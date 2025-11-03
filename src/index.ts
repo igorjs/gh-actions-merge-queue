@@ -343,7 +343,7 @@ async function run() {
     await initializeLabels(owner, repo);
 
     // Initialize helper functions with context
-    const branchOps = createBranchOperations(octokit, owner, repo);
+    const branchOps = createBranchOperations(owner, repo);
     const queueOps = createQueueOperations(
       octokit,
       owner,
@@ -391,55 +391,27 @@ async function run() {
  * Create branch operations
  */
 function createBranchOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
 ) {
   async function getBranchSha(branch: string): Promise<string> {
-    const ref = await octokit.rest.git.getRef({
-      owner,
-      repo,
-      ref: `heads/${branch}`,
-    });
-    return ref.data.object.sha;
+    return await gh.getRef(owner, repo, branch);
   }
 
   async function ensureBranch(branch: string, sha: string): Promise<void> {
     try {
       const currentSha = await getBranchSha(branch);
       if (currentSha !== sha) {
-        await octokit.rest.git.updateRef({
-          owner,
-          repo,
-          ref: `heads/${branch}`,
-          sha,
-          force: true,
-        });
+        await gh.updateRef(owner, repo, branch, sha, true);
       }
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        await octokit.rest.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${branch}`,
-          sha,
-        });
-      } else {
-        throw e;
-      }
+      // If branch doesn't exist (404), create it
+      await gh.createRef(owner, repo, branch, sha);
     }
   }
 
   async function deleteBranch(branch: string): Promise<void> {
-    try {
-      await octokit.rest.git.deleteRef({
-        owner,
-        repo,
-        ref: `heads/${branch}`,
-      });
-    } catch {
-      // Ignore errors (e.g., 404)
-    }
+    await gh.deleteRef(owner, repo, branch);
   }
 
   return { getBranchSha, ensureBranch, deleteBranch };
