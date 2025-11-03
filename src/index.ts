@@ -345,7 +345,6 @@ async function run() {
     // Initialize helper functions with context
     const branchOps = createBranchOperations(owner, repo);
     const queueOps = createQueueOperations(
-      octokit,
       owner,
       repo,
       config.stateBranch,
@@ -421,7 +420,6 @@ function createBranchOperations(
  * Create queue operations
  */
 function createQueueOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   stateBranch: string,
@@ -434,31 +432,15 @@ function createQueueOperations(
     try {
       await branchOps.getBranchSha(stateBranch);
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        await octokit.rest.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${stateBranch}`,
-          sha: baseSha,
-        });
-      } else {
-        throw e;
-      }
+      // If branch doesn't exist, create it
+      await gh.createRef(owner, repo, stateBranch, baseSha);
     }
   }
 
   async function fetchQueueFile(): Promise<QueueInfo> {
-    const { data } = await octokit.request(
-      "GET /repos/{owner}/{repo}/contents/{path}",
-      {
-        owner,
-        repo,
-        path: queueFile,
-        ref: stateBranch,
-      },
-    );
+    const data = await gh.getFileContents(owner, repo, queueFile, stateBranch);
 
-    if ("content" in data && typeof data.content === "string") {
+    if (data.content) {
       const content = Buffer.from(
         data.content,
         data.encoding === "base64" ? "base64" : "utf8",
@@ -475,14 +457,14 @@ function createQueueOperations(
     const encoded = Buffer.from(JSON.stringify(initial, null, 2)).toString(
       "base64",
     );
-    await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+    await gh.putFileContents(
       owner,
       repo,
-      path: queueFile,
-      branch: stateBranch,
-      message: "merge-queue: init queue [skip ci]",
-      content: encoded,
-    });
+      queueFile,
+      stateBranch,
+      "merge-queue: init queue [skip ci]",
+      encoded,
+    );
     return { queue: [], sha: null };
   }
 
@@ -492,10 +474,8 @@ function createQueueOperations(
     try {
       return await fetchQueueFile();
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        return await initializeQueueFile();
-      }
-      throw e;
+      // If file doesn't exist, initialize it
+      return await initializeQueueFile();
     }
   }
 
@@ -508,32 +488,17 @@ function createQueueOperations(
       "base64",
     );
 
-    const params = {
+    const newSha = await gh.putFileContents(
       owner,
       repo,
-      path: queueFile,
-      branch: stateBranch,
-      message: "merge-queue: sync queue [skip ci]",
-      content: encoded,
-      ...(sha ? { sha } : {}),
-    };
-
-    const res = await octokit.request(
-      "PUT /repos/{owner}/{repo}/contents/{path}",
-      params,
+      queueFile,
+      stateBranch,
+      "merge-queue: sync queue [skip ci]",
+      encoded,
+      sha || undefined,
     );
 
-    if (
-      "content" in res.data &&
-      res.data.content &&
-      typeof res.data.content === "object" &&
-      res.data.content !== null &&
-      "sha" in res.data.content &&
-      typeof res.data.content.sha === "string"
-    ) {
-      return res.data.content.sha;
-    }
-    return sha || "";
+    return newSha || sha || "";
   }
 
   return { readQueue, writeQueue };
