@@ -174,7 +174,7 @@ function readBranchConfig() {
 function readDashboardConfig() {
   return {
     dashboardTitle: getStringInput("dashboard_title", "Merge Queue Dashboard"),
-    dashboardLabel: getStringInput("dashboard_label", "merge-queue-dashboard"),
+    dashboardLabel: getStringInput("dashboard_label", "mq/dashboard"),
     dashboardPin: getBooleanInput("dashboard_pin", true),
     dashboardScanOpenIssues: getIntInput("dashboard_scan_open_issues", 100),
   };
@@ -289,6 +289,7 @@ async function initializeLabels(
   repo: string,
 ): Promise<void> {
   const labels = [
+    { name: "mq/dashboard", description: "Label for the merge queue dashboard issue", color: "0E8A16" },
     { name: "mq/queued", description: "PR is in the merge queue", color: "0366d6" },
     { name: "mq/staging", description: "PR is being staged for testing", color: "fbca04" },
     { name: "mq/testing", description: "PR is being tested in the queue", color: "d4c5f9" },

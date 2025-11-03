@@ -27,7 +27,7 @@ The action requires the following GitHub token permissions:
 
 On first run, the action automatically creates:
 
-* **Labels** – `mq/queued`, `mq/staging`, `mq/testing`, `mq/conflict`, `mq/fastlane`, `mq/hold`, `mq/ready`, `mq/failed`, and `merge-queue-dashboard`
+* **Labels** – `mq/dashboard`, `mq/queued`, `mq/staging`, `mq/testing`, `mq/conflict`, `mq/fastlane`, `mq/hold`, `mq/ready`, and `mq/failed`
 * **Dashboard Issue** – A pinned and locked issue displaying the current queue state (when `enable_queue_tracking` is enabled)
 * **State Branch** – A branch to persist queue state between workflow runs
 
