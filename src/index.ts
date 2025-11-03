@@ -281,6 +281,59 @@ function renderQueueMarkdown(rows: PrDetail[], baseBranch: string): string {
 }
 
 /**
+ * Initialize required labels for merge queue operations
+ */
+async function initializeLabels(
+  octokit: ReturnType<typeof github.getOctokit>,
+  owner: string,
+  repo: string,
+): Promise<void> {
+  const labels = [
+    { name: "mq/queued", description: "PR is in the merge queue", color: "0366d6" },
+    { name: "mq/staging", description: "PR is being staged for testing", color: "fbca04" },
+    { name: "mq/testing", description: "PR is being tested in the queue", color: "d4c5f9" },
+    { name: "mq/conflict", description: "PR has merge conflicts", color: "d73a4a" },
+    { name: "mq/fastlane", description: "PR is in the fastlane (hotfix) queue", color: "ff6347" },
+    { name: "mq/hold", description: "Hold PR from entering the queue", color: "e99695" },
+    { name: "mq/ready", description: "PR is ready to be queued", color: "0e8a16" },
+    { name: "mq/failed", description: "PR failed queue tests", color: "b60205" },
+  ];
+
+  try {
+    const { data: existingLabels } = await octokit.rest.issues.listLabelsForRepo({
+      owner,
+      repo,
+      per_page: 100,
+    });
+
+    const existingLabelNames = new Set(
+      existingLabels.map((l: GithubLabel) => l.name.toLowerCase())
+    );
+
+    for (const label of labels) {
+      if (!existingLabelNames.has(label.name.toLowerCase())) {
+        try {
+          await octokit.rest.issues.createLabel({
+            owner,
+            repo,
+            name: label.name,
+            description: label.description,
+            color: label.color,
+          });
+          core.info(`Created label: ${label.name}`);
+        } catch (e) {
+          const errorMessage = getErrorMessage(e);
+          core.warning(`Failed to create label "${label.name}": ${errorMessage}`);
+        }
+      }
+    }
+  } catch (e) {
+    const errorMessage = getErrorMessage(e);
+    core.warning(`Failed to initialize labels: ${errorMessage}`);
+  }
+}
+
+/**
  * Merge Queue Action
  *
  * This script implements a merge queue with optional fastlane handling,
@@ -295,6 +348,9 @@ async function run() {
     const fastlaneRegexes = createFastlaneMatchers(
       config.fastlaneMatchersInput,
     );
+
+    // Initialize labels
+    await initializeLabels(octokit, owner, repo);
 
     // Initialize helper functions with context
     const branchOps = createBranchOperations(octokit, owner, repo);
@@ -731,32 +787,53 @@ function createDashboardOperations(
   dashboardPin: boolean,
   dashboardScanOpenIssues: number,
 ) {
+  async function ensureLabelExists(
+    labelName: string,
+    description: string,
+    color: string,
+  ): Promise<boolean> {
+    try {
+      const { data: existingLabels } =
+        await octokit.rest.issues.listLabelsForRepo({
+          owner,
+          repo,
+          per_page: 100,
+        });
+
+      const hasLabel = existingLabels.some(
+        (l: GithubLabel) =>
+          l.name.toLowerCase() === labelName.toLowerCase(),
+      );
+
+      if (!hasLabel) {
+        core.info(`Creating label "${labelName}"...`);
+        await octokit.rest.issues.createLabel({
+          owner,
+          repo,
+          name: labelName,
+          description,
+          color,
+        });
+        core.info(`Label "${labelName}" created successfully.`);
+      }
+      return true;
+    } catch (e) {
+      const errorMessage = getErrorMessage(e);
+      core.warning(`Failed to ensure label "${labelName}": ${errorMessage}`);
+      return false;
+    }
+  }
+
   async function getLabelsToUse(): Promise<string[]> {
     const labelsToUse: string[] = [];
     if (dashboardLabel) {
-      try {
-        const { data: existingLabels } =
-          await octokit.rest.issues.listLabelsForRepo({
-            owner,
-            repo,
-            per_page: 100,
-          });
-
-        const hasLabel = existingLabels.some(
-          (l: GithubLabel) =>
-            l.name.toLowerCase() === dashboardLabel.toLowerCase(),
-        );
-
-        if (hasLabel) {
-          labelsToUse.push(dashboardLabel);
-        } else {
-          core.info(
-            `Dashboard label "${dashboardLabel}" not found; issue will be unlabeled.`,
-          );
-        }
-      } catch (e) {
-        const errorMessage = getErrorMessage(e);
-        core.warning(`Failed to list labels: ${errorMessage}`);
+      const labelExists = await ensureLabelExists(
+        dashboardLabel,
+        "Label for the merge queue dashboard issue",
+        "0E8A16",
+      );
+      if (labelExists) {
+        labelsToUse.push(dashboardLabel);
       }
     }
     return labelsToUse;
