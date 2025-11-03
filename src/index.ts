@@ -4,6 +4,7 @@
 
 import * as core from "@actions/core";
 import * as github from "@actions/github";
+import * as gh from "./github-cli";
 
 /**
  * Type definitions
@@ -284,7 +285,6 @@ function renderQueueMarkdown(rows: PrDetail[], baseBranch: string): string {
  * Initialize required labels for merge queue operations
  */
 async function initializeLabels(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
 ): Promise<void> {
@@ -301,26 +301,15 @@ async function initializeLabels(
   ];
 
   try {
-    const { data: existingLabels } = await octokit.rest.issues.listLabelsForRepo({
-      owner,
-      repo,
-      per_page: 100,
-    });
-
+    const existingLabels = await gh.listLabels(owner, repo);
     const existingLabelNames = new Set(
-      existingLabels.map((l: GithubLabel) => l.name.toLowerCase())
+      existingLabels.map((l) => l.name.toLowerCase())
     );
 
     for (const label of labels) {
       if (!existingLabelNames.has(label.name.toLowerCase())) {
         try {
-          await octokit.rest.issues.createLabel({
-            owner,
-            repo,
-            name: label.name,
-            description: label.description,
-            color: label.color,
-          });
+          await gh.createLabel(owner, repo, label.name, label.description, label.color);
           core.info(`Created label: ${label.name}`);
         } catch (e) {
           const errorMessage = getErrorMessage(e);
@@ -351,7 +340,7 @@ async function run() {
     );
 
     // Initialize labels
-    await initializeLabels(octokit, owner, repo);
+    await initializeLabels(owner, repo);
 
     // Initialize helper functions with context
     const branchOps = createBranchOperations(octokit, owner, repo);
