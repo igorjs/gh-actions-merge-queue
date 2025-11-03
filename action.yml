@@ -1,304 +1,138 @@
 name: "Merge Queue (FIFO + Fastlane)"
-description: |
-  A label‑free merge queue for GitHub. It serialises merges in FIFO order,
-  provides a hotfix fastlane, and includes optional auto‑update of stale PR
-  branches. Works on free and private repositories using only the
-  built‑in GITHUB_TOKEN. FIFO queue state is persisted in a dedicated
-  branch to survive workflow restarts.
-author: "igorjs"
+description: >-
+  A merge queue for GitHub Pull Requests implementing FIFO ordering with
+  automatic re-testing, hot‑fix fastlane, stale branch updating, optional queue
+  tracking via a dashboard issue, and optional sync to a GitHub Project (v2).
+  Designed to work on free tier accounts and private repositories without
+  requiring any paid GitHub features. This action serialises PR merges,
+  ensures each change is tested on top of the current base branch and
+  prevents bad commits from drifting into your protected branch. It can also
+  surface the queue in a project board or dashboard issue for your team.
+
+author: "igorjs <oss@mail.igorjs.io"
+
 branding:
   color: "green"
   icon: "git-merge"
 
+# Inputs controlling authentication and behaviour. See README for details.
 inputs:
   token:
-    description: "GitHub token (defaults to GITHUB_TOKEN)"
+    description: >-
+      GitHub token used for API calls. Defaults to the GITHUB_TOKEN provided
+      by the runner. You can provide a fine‑grained PAT when syncing to a
+      project owned by an organisation that your workflow token cannot access.
     required: false
   base_branch:
-    description: "Protected base branch (e.g. master or main)"
+    description: >-
+      The protected branch that PRs merge into (e.g. master or main). This
+      action will stage merges on top of this branch and merge tested PRs
+      back into this branch.
     required: false
     default: "master"
   queue_branch:
-    description: "Temporary queue branch used for staging merges"
+    description: >-
+      The branch used to stage normal queue merges. It will be force
+      updated each run and optionally deleted at the end.
     required: false
     default: "merge-queue/staging"
   fastlane_branch:
-    description: "Temporary branch used when a PR matches the fastlane criteria"
+    description: >-
+      The branch used to stage fastlane (hotfix) merges. It will be force
+      updated each run and optionally deleted at the end.
     required: false
     default: "merge-queue/fastlane"
   state_branch:
-    description: "Branch where the FIFO queue state file is persisted"
+    description: >-
+      Branch where the action persists its internal state, including the
+      FIFO queue file. This branch will be created automatically if it does
+      not exist.
     required: false
     default: "merge-queue/state"
   queue_file:
-    description: "Path to the queue JSON file inside the state branch"
+    description: >-
+      Path to the queue file (JSON) within the state branch. The file stores
+      an object of the form `{ "version": 1, "queue": [PR numbers] }`.
     required: false
     default: ".github/merge-queue-queue.json"
   status_context:
-    description: "Commit status context to require in branch protection"
+    description: >-
+      Name of the commit status created on each PR head. Add this context to
+      your branch protection settings.
     required: false
     default: "merge-queue"
   mode:
-    description: "Operation mode: 'shadow' (no merges) or 'live' (merge when green)"
+    description: >-
+      Operation mode: either `shadow` or `live`. In `shadow` mode the
+      action stages changes and reports status but never merges PRs. In
+      `live` mode the action merges successfully tested PRs.
     required: false
     default: "shadow"
   fastlane_matchers:
-    description: |
-      Comma‑separated list of case‑insensitive regular expressions. If a PR’s
-      branch name or title matches any expression, it bypasses the FIFO queue
-      and is merged immediately after passing staging. Examples: '^(hotfix|critical)/',
-      '\\bhotfix\\b', '^hotfix:'.
+    description: >-
+      Comma separated list of case‑insensitive regular expressions used to
+      detect hotfix or critical PRs by branch name or title. When a PR
+      matches any pattern it bypasses the FIFO queue and is processed
+      immediately (fastlane). Patterns must be valid JavaScript RegExp
+      without surrounding slashes.
     required: false
-    default: "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:"
+    default: "^(hotfix|critical|security)/,\bhotfix\b,^hotfix:"
   behind_max_commits:
-    description: |
-      If a PR branch is more than this many commits behind the base branch,
-      attempt to auto‑update it before staging (0 disables auto‑update). This
-      requires PR authors to allow maintainers to make changes.
+    description: >-
+      If a PR branch is behind the base branch by more than this many
+      commits the action will attempt to update the branch automatically
+      using the Update Branch API. Set to 0 to disable auto updating. PRs
+      from forks with edits disabled cannot be auto updated.
     required: false
     default: "100"
   merge_method:
-    description: "Merge strategy for the final merge (merge or squash)"
+    description: >-
+      Merge method used when merging the PR back into the base branch. Use
+      `merge` for a merge commit (ensuring the merged tree exactly matches
+      the staged test) or `squash` to squash commits if your repository
+      enforces a linear history.
     required: false
     default: "merge"
   clean_queue:
-    description: "Whether to delete the temporary queue/fastlane branch after each run"
+    description: >-
+      Whether to delete the queue/fastlane branch after each run. Set to
+      `false` if you wish to keep the branches for audit purposes.
     required: false
     default: "true"
+  # Queue dashboard configuration
+  enable_queue_tracking:
+    description: >-
+      When `true`, the action renders the current queue as a markdown
+      table in the job summary and upserts a dashboard issue. Requires
+      `issues: write` permission.
+    required: false
+    default: "true"
+  dashboard_title:
+    description: >-
+      Title used for the dashboard issue. If an open issue with this title
+      exists it will be updated; otherwise a new issue is created.
+    required: false
+    default: "Merge Queue Dashboard"
+  dashboard_label:
+    description: >-
+      Optional existing label to attach to the dashboard issue. The label
+      must exist in the repository; if it doesn’t the issue will be created
+      without labels.
+    required: false
+    default: "merge-queue-dashboard"
+  dashboard_pin:
+    description: >-
+      Whether to pin the dashboard issue when created or updated. Requires
+      `issues: write` permission.
+    required: false
+    default: "true"
+  dashboard_scan_open_issues:
+    description: >-
+      Maximum number of open issues to scan when locating an existing
+      dashboard issue. Increase if your repository has many open issues.
+    required: false
+    default: "100"
 
 runs:
-  using: "composite"
-  steps:
-    - name: Run merge queue
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ inputs.token || github.token }}
-        script: |
-          const core = require("@actions/core");
-
-          // Extract inputs with defaults
-          const owner        = context.repo.owner;
-          const repo         = context.repo.repo;
-          const BASE         = core.getInput("base_branch") || "master";
-          const QUEUE_BRANCH = core.getInput("queue_branch") || "merge-queue/staging";
-          const FAST_BRANCH  = core.getInput("fastlane_branch") || "merge-queue/fastlane";
-          const STATE_BRANCH = core.getInput("state_branch") || "merge-queue/state";
-          const QUEUE_FILE   = core.getInput("queue_file") || ".github/merge-queue-queue.json";
-          const STATUS_CTX   = core.getInput("status_context") || "merge-queue";
-          const MODE         = (core.getInput("mode") || "shadow").toLowerCase();
-          const MATCHERS_RAW = core.getInput("fastlane_matchers") || "";
-          const BEHIND_LIMIT = parseInt(core.getInput("behind_max_commits") || "100", 10);
-          const MERGE_METHOD = (core.getInput("merge_method") || "merge").toLowerCase();
-          const CLEAN_QUEUE  = (core.getInput("clean_queue") || "true").toLowerCase() === "true";
-
-          // Compile fastlane regexes
-          const rxList = MATCHERS_RAW.split(",").map(s => s.trim()).filter(Boolean).map(s => {
-            try { return new RegExp(s, "i"); } catch { return null; }
-          }).filter(Boolean);
-
-          // Helper functions
-          async function getRef(branch) {
-            return await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
-          }
-          async function getRefShaOrNull(branch) {
-            try { const r = await getRef(branch); return r.data.object.sha; } catch { return null; }
-          }
-          async function ensureBranch(branch, sha) {
-            const current = await getRefShaOrNull(branch);
-            if (!current) {
-              await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha });
-            } else if (current !== sha) {
-              await github.rest.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha, force: true });
-            }
-          }
-          async function deleteBranchIfExists(branch) {
-            try { await github.rest.git.deleteRef({ owner, repo, ref: `heads/${branch}` }); } catch { /* ignore */ }
-          }
-          function isFastlane(pr) {
-            const n = pr.headRefName || "";
-            const t = pr.title || "";
-            return rxList.some(r => r.test(n) || r.test(t));
-          }
-          async function setStatus(sha, state, description) {
-            await github.rest.repos.createCommitStatus({ owner, repo, sha, state, context: STATUS_CTX, description });
-          }
-          async function commentPR(number, body) {
-            await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
-          }
-
-          // 1) Ensure state branch and queue file exist
-          const baseRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${BASE}` });
-          const baseSha = baseRef.data.object.sha;
-
-          // Ensure state branch exists on base tip
-          const stateSha = await getRefShaOrNull(STATE_BRANCH);
-          if (!stateSha) {
-            await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${STATE_BRANCH}`, sha: baseSha });
-          }
-
-          // Read queue file, initialising if missing
-          let queueSha = null;
-          let queueJson = { version: 1, queue: [] };
-          try {
-            const f = await github.request("GET /repos/{owner}/{repo}/contents/{path}", {
-              owner, repo, path: QUEUE_FILE, ref: STATE_BRANCH
-            });
-            queueSha = f.data.sha;
-            const raw = Buffer.from(f.data.content, f.data.encoding === "base64" ? "base64" : "utf8").toString("utf8");
-            const obj = JSON.parse(raw || "{}");
-            queueJson = { version: 1, queue: Array.isArray(obj.queue) ? obj.queue : [] };
-          } catch {
-            // create file on state branch
-            const content = Buffer.from(JSON.stringify(queueJson, null, 2)).toString("base64");
-            const r = await github.request("PUT /repos/{owner}/{repo}/contents/{path}", {
-              owner, repo, path: QUEUE_FILE, branch: STATE_BRANCH,
-              message: "merge-queue: init queue [skip ci]",
-              content
-            });
-            queueSha = r.data.content.sha;
-          }
-
-          // 2) Query eligible PRs and find fastlane
-          const gql = `
-            query($owner:String!, $repo:String!, $base:String!) {
-              repository(owner:$owner, name:$repo) {
-                pullRequests(states:OPEN, baseRefName:$base, first:100, orderBy:{field:CREATED_AT, direction:ASC}) {
-                  nodes {
-                    createdAt
-                    title
-                    number
-                    isDraft
-                    headRefName
-                    headRefOid
-                    reviewDecision
-                    mergeable
-                  }
-                }
-              }
-            }
-          `;
-          const prs = (await github.graphql(gql, { owner, repo, base: BASE }))
-            .repository.pullRequests.nodes;
-
-          const eligible = prs.filter(pr =>
-            !pr.isDraft &&
-            pr.reviewDecision === "APPROVED" &&
-            pr.mergeable !== "CONFLICTING"
-          );
-          const fastPr = eligible.find(isFastlane);
-          const normalEligible = eligible.filter(pr => !isFastlane(pr));
-
-          // 3) Sync FIFO queue: remove non-eligible, append new ones
-          const eligNums = new Set(normalEligible.map(p => p.number));
-          queueJson.queue = queueJson.queue.filter(n => eligNums.has(n));
-          for (const pr of normalEligible) {
-            if (!queueJson.queue.includes(pr.number)) queueJson.queue.push(pr.number);
-          }
-
-          // Persist queue state
-          async function putQueue(newObj, msg) {
-            const content = Buffer.from(JSON.stringify(newObj, null, 2)).toString("base64");
-            const r = await github.request("PUT /repos/{owner}/{repo}/contents/{path}", {
-              owner, repo, path: QUEUE_FILE, branch: STATE_BRANCH,
-              message: msg, content, sha: queueSha || undefined
-            });
-            queueSha = r.data.content.sha;
-          }
-          await putQueue(queueJson, "merge-queue: sync queue [skip ci]");
-
-          // 4) Pick candidate: fastlane first or FIFO head
-          let candidate = null;
-          let isFast = false;
-          if (fastPr) {
-            candidate = fastPr;
-            isFast = true;
-          } else if (queueJson.queue.length) {
-            const headNum = queueJson.queue[0];
-            candidate = normalEligible.find(p => p.number === headNum) || null;
-          }
-          if (!candidate) {
-            core.info("No eligible PR found.");
-            return;
-          }
-
-          const prNumber = candidate.number;
-
-          // 5) Auto-update PR branch if far behind
-          let pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-          const headRefName = pr.data.head.ref;
-          const headRepoOwner = pr.data.head.repo.owner.login;
-          const headQualified = `${headRepoOwner}:${headRefName}`;
-          try {
-            const cmp = await github.rest.repos.compareCommits({ owner, repo, base: BASE, head: headQualified });
-            const behindBy = cmp.data.behind_by ?? 0;
-            if (BEHIND_LIMIT > 0 && behindBy > BEHIND_LIMIT) {
-              try {
-                await github.request("POST /repos/{owner}/{repo}/pulls/{pull_number}/update-branch", {
-                  owner, repo, pull_number: prNumber
-                });
-                pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
-                core.notice(`PR #${prNumber} auto-updated from ${BASE}; was behind ${behindBy} commits.`);
-              } catch (e) {
-                core.warning(`Auto-update failed (fork or perms). Continuing. ${e?.message || e}`);
-              }
-            }
-          } catch (e) {
-            core.warning(`compareCommits failed: ${e?.message || e}`);
-          }
-
-          const prHeadSha = pr.data.head.sha;
-          await setStatus(prHeadSha, "pending", "Queued in merge queue");
-
-          // 6) Stage on temporary queue branch
-          const QUEUE = isFast ? FAST_BRANCH : QUEUE_BRANCH;
-          // Ensure queue branch is reset to current base tip
-          await ensureBranch(QUEUE, baseSha);
-          // Merge PR head into queue branch
-          let stagedSha = null;
-          try {
-            const mergeResp = await github.rest.repos.merge({ owner, repo, base: QUEUE, head: prHeadSha });
-            stagedSha = mergeResp.data.sha;
-          } catch (e) {
-            if (e.status === 409) {
-              await commentPR(prNumber, `Merge queue could not stage this PR due to conflicts with the latest \`${BASE}\`. Please rebase/merge and push.`);
-              await setStatus(prHeadSha, "failure", "Conflict with base branch");
-              if (CLEAN_QUEUE) await deleteBranchIfExists(QUEUE);
-              return;
-            }
-            throw e;
-          }
-
-          // Verify base hasn't moved since we staged
-          const currentBaseRef = await github.rest.git.getRef({ owner, repo, ref: `heads/${BASE}` });
-          const currentBaseSha = currentBaseRef.data.object.sha;
-          const moved = baseSha !== currentBaseSha;
-          if (moved) {
-            await setStatus(prHeadSha, "pending", "Base moved during staging; will retry");
-            if (CLEAN_QUEUE) await deleteBranchIfExists(QUEUE);
-            return;
-          }
-
-          // 7) Perform merge or report depending on mode
-          if (MODE === "live") {
-            await github.rest.pulls.merge({
-              owner, repo, pull_number: prNumber,
-              merge_method: MERGE_METHOD === "squash" ? "squash" : "merge"
-            });
-            await setStatus(prHeadSha, "success", isFast ? "Fastlane passed; merged to base" : "Passed on staging; merged to base");
-            // Remove from FIFO queue if not fastlane
-            if (!isFast) {
-              const newQueue = queueJson.queue.filter(n => n !== prNumber);
-              queueJson.queue = newQueue;
-              await putQueue(queueJson, `merge-queue: dequeue #${prNumber} [skip ci]`);
-            }
-          } else {
-            // Shadow mode: just report success
-            await setStatus(prHeadSha, "success", moved ? "Base moved during staging; will retry" : "Passed on staging (shadow)");
-          }
-
-          // 8) Clean up temporary queue branch if configured
-          if (CLEAN_QUEUE) {
-            await deleteBranchIfExists(QUEUE);
-          }
-
-          core.info(`Done. Mode=${MODE}, PR=#${prNumber}, fastlane=${isFast}, staged=${stagedSha}`);
+  using: "node24"
+  main: "dist/index.js"
