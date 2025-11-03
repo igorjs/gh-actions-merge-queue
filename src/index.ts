@@ -362,7 +362,6 @@ async function run() {
       config.behindMaxCommits,
     );
     const dashboardOps = createDashboardOperations(
-      octokit,
       owner,
       repo,
       config.dashboardTitle,
@@ -769,7 +768,6 @@ function createPROperations(
  * Create dashboard operations
  */
 function createDashboardOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   dashboardTitle: string,
@@ -789,16 +787,8 @@ function createDashboardOperations(
 
   async function findExistingIssue(): Promise<GithubIssue | null> {
     try {
-      const { data: openIssues } = await octokit.rest.issues.listForRepo({
-        owner,
-        repo,
-        state: "open",
-        per_page: dashboardScanOpenIssues,
-      });
-
-      const found = openIssues.find(
-        (i: GithubIssue) => i.title === dashboardTitle,
-      );
+      const openIssues = await gh.listIssues(owner, repo, "open", dashboardScanOpenIssues);
+      const found = openIssues.find((i) => i.title === dashboardTitle);
       return found || null;
     } catch (e) {
       const errorMessage = getErrorMessage(e);
@@ -810,20 +800,7 @@ function createDashboardOperations(
   async function pinIssue(issueNumber: number): Promise<void> {
     if (!dashboardPin) return;
     try {
-      await octokit.graphql(
-        `mutation($input: PinIssueInput!) {
-          pinIssue(input: $input) {
-            issue {
-              id
-            }
-          }
-        }`,
-        {
-          input: {
-            issueId: await getIssueNodeId(issueNumber),
-          },
-        }
-      );
+      await gh.pinIssue(owner, repo, issueNumber);
       core.info(`Pinned dashboard issue #${issueNumber}`);
     } catch (e) {
       const errorMessage = getErrorMessage(e);
@@ -833,12 +810,7 @@ function createDashboardOperations(
 
   async function lockIssue(issueNumber: number): Promise<void> {
     try {
-      await octokit.rest.issues.lock({
-        owner,
-        repo,
-        issue_number: issueNumber,
-        lock_reason: "resolved",
-      });
+      await gh.lockIssue(owner, repo, issueNumber, "resolved");
       core.info(`Locked dashboard issue #${issueNumber}`);
     } catch (e) {
       const errorMessage = getErrorMessage(e);
@@ -846,50 +818,25 @@ function createDashboardOperations(
     }
   }
 
-  async function getIssueNodeId(issueNumber: number): Promise<string> {
-    const { data } = await octokit.rest.issues.get({
-      owner,
-      repo,
-      issue_number: issueNumber,
-    });
-    return data.node_id;
-  }
-
   async function updateExistingIssue(
     issueNumber: number,
     body: string,
   ): Promise<void> {
-    await octokit.rest.issues.update({
-      owner,
-      repo,
-      issue_number: issueNumber,
-      body,
-    });
+    await gh.updateIssue(owner, repo, issueNumber, body);
     await pinIssue(issueNumber);
     await lockIssue(issueNumber);
   }
 
   async function createNewIssue(body: string, labels: string[]): Promise<void> {
     try {
-      const created = await octokit.rest.issues.create({
-        owner,
-        repo,
-        title: dashboardTitle,
-        body,
-        labels,
-      });
-      await pinIssue(created.data.number);
-      await lockIssue(created.data.number);
+      const issueNumber = await gh.createIssue(owner, repo, dashboardTitle, body, labels);
+      await pinIssue(issueNumber);
+      await lockIssue(issueNumber);
     } catch {
       try {
-        const created = await octokit.rest.issues.create({
-          owner,
-          repo,
-          title: dashboardTitle,
-          body,
-        });
-        await pinIssue(created.data.number);
-        await lockIssue(created.data.number);
+        const issueNumber = await gh.createIssue(owner, repo, dashboardTitle, body);
+        await pinIssue(issueNumber);
+        await lockIssue(issueNumber);
       } catch (e2) {
         const errorMessage = getErrorMessage(e2);
         core.warning(`Failed to create dashboard issue: ${errorMessage}`);
