@@ -35,3 +35,5 @@ jobs:
           status_context: merge-queue
           behind_max_commits: "100"
           fastlane_matchers: "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

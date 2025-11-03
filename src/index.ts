@@ -122,7 +122,7 @@ function getToken(): string {
   const token = core.getInput("token") || process.env.GITHUB_TOKEN || "";
   if (!token) {
     throw new Error(
-      'No GitHub token provided. Set the "token" input or rely on GITHUB_TOKEN.'
+      'No GitHub token provided. Set the "token" input or rely on GITHUB_TOKEN.',
     );
   }
   return token;
@@ -196,11 +196,11 @@ function readProjectConfig() {
     projectTitle: getStringInput("project_title", "Merge Queue"),
     projectStatusFieldName: getStringInput(
       "project_status_field_name",
-      "Status"
+      "Status",
     ),
     projectQueuePosFieldName: getStringInput(
       "project_queuepos_field_name",
-      "Queue Position"
+      "Queue Position",
     ),
   };
 }
@@ -217,7 +217,7 @@ function readConfig(): Config {
     mode: getLowercaseInput("mode", "shadow"),
     fastlaneMatchersInput: getStringInput(
       "fastlane_matchers",
-      "^(hotfix|critical|security)/,\bhotfix\b,^hotfix:"
+      "^(hotfix|critical|security)/,\bhotfix\b,^hotfix:",
     ),
     behindMaxCommits: getIntInput("behind_max_commits", 100),
     mergeMethod: getLowercaseInput("merge_method", "merge"),
@@ -253,7 +253,7 @@ function createFastlaneMatchers(input: string): RegExp[] {
  */
 function isFastlane(
   pr: { headRefName?: string; title?: string },
-  fastlaneRegexes: RegExp[]
+  fastlaneRegexes: RegExp[],
 ): boolean {
   if (!fastlaneRegexes.length) return false;
   const name = pr.headRefName || "";
@@ -293,7 +293,7 @@ async function run() {
     const config = readConfig();
     const octokit = github.getOctokit(config.token);
     const fastlaneRegexes = createFastlaneMatchers(
-      config.fastlaneMatchersInput
+      config.fastlaneMatchersInput,
     );
 
     // Initialize helper functions with context
@@ -305,7 +305,7 @@ async function run() {
       config.stateBranch,
       config.queueFile,
       config.baseBranch,
-      branchOps
+      branchOps,
     );
     const prOps = createPROperations(
       octokit,
@@ -313,7 +313,7 @@ async function run() {
       repo,
       config.baseBranch,
       config.statusContext,
-      config.behindMaxCommits
+      config.behindMaxCommits,
     );
     const dashboardOps = createDashboardOperations(
       octokit,
@@ -322,7 +322,7 @@ async function run() {
       config.dashboardTitle,
       config.dashboardLabel,
       config.dashboardPin,
-      config.dashboardScanOpenIssues
+      config.dashboardScanOpenIssues,
     );
 
     // Main workflow
@@ -332,7 +332,7 @@ async function run() {
       branchOps,
       queueOps,
       prOps,
-      dashboardOps
+      dashboardOps,
     );
   } catch (error) {
     const errorMessage = getErrorMessage(error);
@@ -348,7 +348,7 @@ async function run() {
 function createBranchOperations(
   octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
-  repo: string
+  repo: string,
 ) {
   async function getBranchSha(branch: string): Promise<string> {
     const ref = await octokit.rest.git.getRef({
@@ -410,7 +410,7 @@ function createQueueOperations(
   stateBranch: string,
   queueFile: string,
   baseBranch: string,
-  branchOps: ReturnType<typeof createBranchOperations>
+  branchOps: ReturnType<typeof createBranchOperations>,
 ) {
   async function ensureStateBranch(): Promise<void> {
     const baseSha = await branchOps.getBranchSha(baseBranch);
@@ -438,13 +438,13 @@ function createQueueOperations(
         repo,
         path: queueFile,
         ref: stateBranch,
-      }
+      },
     );
 
     if ("content" in data && typeof data.content === "string") {
       const content = Buffer.from(
         data.content,
-        data.encoding === "base64" ? "base64" : "utf8"
+        data.encoding === "base64" ? "base64" : "utf8",
       ).toString("utf8");
       const json = JSON.parse(content || "{}") as Partial<QueueData>;
       const queue = Array.isArray(json.queue) ? json.queue : [];
@@ -456,7 +456,7 @@ function createQueueOperations(
   async function initializeQueueFile(): Promise<QueueInfo> {
     const initial: QueueData = { version: 1, queue: [] };
     const encoded = Buffer.from(JSON.stringify(initial, null, 2)).toString(
-      "base64"
+      "base64",
     );
     await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
       owner,
@@ -484,11 +484,11 @@ function createQueueOperations(
 
   async function writeQueue(
     queue: number[],
-    sha: string | null
+    sha: string | null,
   ): Promise<string> {
     const obj: QueueData = { version: 1, queue };
     const encoded = Buffer.from(JSON.stringify(obj, null, 2)).toString(
-      "base64"
+      "base64",
     );
 
     const params = {
@@ -503,7 +503,7 @@ function createQueueOperations(
 
     const res = await octokit.request(
       "PUT /repos/{owner}/{repo}/contents/{path}",
-      params
+      params,
     );
 
     if (
@@ -531,7 +531,7 @@ function createPROperations(
   repo: string,
   baseBranch: string,
   statusContext: string,
-  behindMaxCommits: number
+  behindMaxCommits: number,
 ) {
   async function fetchOpenPRs(): Promise<PullRequestNode[]> {
     const query = `
@@ -564,7 +564,7 @@ function createPROperations(
 
   async function getBehindBy(
     base: string,
-    head: string
+    head: string,
   ): Promise<number | null> {
     try {
       const cmp = await octokit.rest.repos.compareCommits({
@@ -577,7 +577,7 @@ function createPROperations(
     } catch (e) {
       const errorMessage = getErrorMessage(e);
       core.warning(
-        `compareCommits failed for ${base}..${head}: ${errorMessage}`
+        `compareCommits failed for ${base}..${head}: ${errorMessage}`,
       );
       return null;
     }
@@ -585,7 +585,7 @@ function createPROperations(
 
   async function maybeUpdateBranch(
     prNumber: number,
-    currentSha: string
+    currentSha: string,
   ): Promise<string> {
     if (!behindMaxCommits || behindMaxCommits <= 0) return currentSha;
 
@@ -612,7 +612,7 @@ function createPROperations(
       try {
         await octokit.request(
           "POST /repos/{owner}/{repo}/pulls/{pull_number}/update-branch",
-          { owner, repo, pull_number: prNumber }
+          { owner, repo, pull_number: prNumber },
         );
 
         const pr2 = await octokit.rest.pulls.get({
@@ -622,7 +622,7 @@ function createPROperations(
         });
 
         core.notice(
-          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.data.head.sha}`
+          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.data.head.sha}`,
         );
         return pr2.data.head.sha;
       } catch (e) {
@@ -637,7 +637,7 @@ function createPROperations(
   async function setStatus(
     sha: string,
     state: "pending" | "success" | "failure" | "error",
-    description: string
+    description: string,
   ): Promise<void> {
     await octokit.rest.repos.createCommitStatus({
       owner,
@@ -653,7 +653,7 @@ function createPROperations(
     trainBranch: string,
     headSha: string,
     baseSha: string,
-    branchOps: ReturnType<typeof createBranchOperations>
+    branchOps: ReturnType<typeof createBranchOperations>,
   ): Promise<StageResult> {
     await branchOps.ensureBranch(trainBranch, baseSha);
     try {
@@ -729,7 +729,7 @@ function createDashboardOperations(
   dashboardTitle: string,
   dashboardLabel: string,
   dashboardPin: boolean,
-  dashboardScanOpenIssues: number
+  dashboardScanOpenIssues: number,
 ) {
   async function getLabelsToUse(): Promise<string[]> {
     const labelsToUse: string[] = [];
@@ -744,14 +744,14 @@ function createDashboardOperations(
 
         const hasLabel = existingLabels.some(
           (l: GithubLabel) =>
-            l.name.toLowerCase() === dashboardLabel.toLowerCase()
+            l.name.toLowerCase() === dashboardLabel.toLowerCase(),
         );
 
         if (hasLabel) {
           labelsToUse.push(dashboardLabel);
         } else {
           core.info(
-            `Dashboard label "${dashboardLabel}" not found; issue will be unlabeled.`
+            `Dashboard label "${dashboardLabel}" not found; issue will be unlabeled.`,
           );
         }
       } catch (e) {
@@ -772,7 +772,7 @@ function createDashboardOperations(
       });
 
       const found = openIssues.find(
-        (i: GithubIssue) => i.title === dashboardTitle
+        (i: GithubIssue) => i.title === dashboardTitle,
       );
       return found || null;
     } catch (e) {
@@ -799,7 +799,7 @@ function createDashboardOperations(
 
   async function updateExistingIssue(
     issueNumber: number,
-    body: string
+    body: string,
   ): Promise<void> {
     await octokit.rest.issues.update({
       owner,
@@ -859,7 +859,7 @@ async function executeQueueWorkflow(
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
   prOps: ReturnType<typeof createPROperations>,
-  dashboardOps: ReturnType<typeof createDashboardOperations>
+  dashboardOps: ReturnType<typeof createDashboardOperations>,
 ) {
   const queueInfo = await queueOps.readQueue();
   let queue: number[] = queueInfo.queue.slice();
@@ -870,12 +870,12 @@ async function executeQueueWorkflow(
     (pr) =>
       !pr.isDraft &&
       pr.reviewDecision === "APPROVED" &&
-      pr.mergeable !== "CONFLICTING"
+      pr.mergeable !== "CONFLICTING",
   );
 
   const fastCandidate = eligible.find((pr) => isFastlane(pr, fastlaneRegexes));
   const normalEligible = eligible.filter(
-    (pr) => !isFastlane(pr, fastlaneRegexes)
+    (pr) => !isFastlane(pr, fastlaneRegexes),
   );
   const eligibleNums = new Set(normalEligible.map((p) => p.number));
 
@@ -888,7 +888,7 @@ async function executeQueueWorkflow(
   const currentQueueContent = JSON.stringify(
     { version: 1, queue: queueInfo.queue },
     null,
-    2
+    2,
   );
   const newQueueContent = JSON.stringify(newQueueJson, null, 2);
 
@@ -924,7 +924,7 @@ async function executeQueueWorkflow(
     branchOps,
     queueOps,
     prOps,
-    dashboardOps
+    dashboardOps,
   );
 }
 
@@ -935,7 +935,7 @@ async function updateDashboard(
   queue: number[],
   prOps: ReturnType<typeof createPROperations>,
   dashboardOps: ReturnType<typeof createDashboardOperations>,
-  baseBranch: string
+  baseBranch: string,
 ) {
   const rows = await prOps.fetchPrDetails(queue);
   const md = renderQueueMarkdown(rows, baseBranch);
@@ -955,7 +955,7 @@ async function processCandidate(
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
   prOps: ReturnType<typeof createPROperations>,
-  dashboardOps: ReturnType<typeof createDashboardOperations>
+  dashboardOps: ReturnType<typeof createDashboardOperations>,
 ) {
   const prNumber = candidate.number;
   let prHeadSha = candidate.headRefOid;
@@ -971,7 +971,7 @@ async function processCandidate(
     trainBranch,
     prHeadSha,
     initialBaseSha,
-    branchOps
+    branchOps,
   );
 
   if (staged.conflict) {
@@ -981,7 +981,7 @@ async function processCandidate(
       trainBranch,
       config,
       branchOps,
-      prOps
+      prOps,
     );
     return;
   }
@@ -1002,7 +1002,7 @@ async function processCandidate(
       config,
       branchOps,
       queueOps,
-      prOps
+      prOps,
     );
   }
 
@@ -1020,7 +1020,7 @@ async function handleConflict(
   trainBranch: string,
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
   const octokit = github.getOctokit(config.token);
@@ -1045,12 +1045,12 @@ async function handleBaseMoved(
   trainBranch: string,
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   await prOps.setStatus(
     prHeadSha,
     "pending",
-    "Base moved during test; will retry"
+    "Base moved during test; will retry",
   );
   if (config.cleanQueue) await branchOps.deleteBranch(trainBranch);
 }
@@ -1068,7 +1068,7 @@ async function handleSuccess(
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   if (config.mode === "live") {
     await mergePR(
@@ -1079,7 +1079,7 @@ async function handleSuccess(
       queueSha,
       config,
       queueOps,
-      prOps
+      prOps,
     );
   } else {
     await prOps.setStatus(
@@ -1087,7 +1087,7 @@ async function handleSuccess(
       "success",
       isFastCandidate
         ? "Fastlane passed on staging (shadow)"
-        : "Passed on staging (shadow)"
+        : "Passed on staging (shadow)",
     );
   }
 
@@ -1107,7 +1107,7 @@ async function mergePR(
   queueSha: string | null,
   config: Config,
   queueOps: ReturnType<typeof createQueueOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
   const octokit = github.getOctokit(config.token);
@@ -1125,7 +1125,7 @@ async function mergePR(
       "success",
       isFastCandidate
         ? "Fastlane passed; merged to base"
-        : "Passed on staging; merged to base"
+        : "Passed on staging; merged to base",
     );
   } catch (e) {
     const errorMessage = getErrorMessage(e);
