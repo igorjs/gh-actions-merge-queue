@@ -788,54 +788,12 @@ function createDashboardOperations(
   dashboardPin: boolean,
   dashboardScanOpenIssues: number,
 ) {
-  async function ensureLabelExists(
-    labelName: string,
-    description: string,
-    color: string,
-  ): Promise<boolean> {
-    try {
-      const { data: existingLabels } =
-        await octokit.rest.issues.listLabelsForRepo({
-          owner,
-          repo,
-          per_page: 100,
-        });
-
-      const hasLabel = existingLabels.some(
-        (l: GithubLabel) =>
-          l.name.toLowerCase() === labelName.toLowerCase(),
-      );
-
-      if (!hasLabel) {
-        core.info(`Creating label "${labelName}"...`);
-        await octokit.rest.issues.createLabel({
-          owner,
-          repo,
-          name: labelName,
-          description,
-          color,
-        });
-        core.info(`Label "${labelName}" created successfully.`);
-      }
-      return true;
-    } catch (e) {
-      const errorMessage = getErrorMessage(e);
-      core.warning(`Failed to ensure label "${labelName}": ${errorMessage}`);
-      return false;
-    }
-  }
-
   async function getLabelsToUse(): Promise<string[]> {
     const labelsToUse: string[] = [];
     if (dashboardLabel) {
-      const labelExists = await ensureLabelExists(
-        dashboardLabel,
-        "Label for the merge queue dashboard issue",
-        "0E8A16",
-      );
-      if (labelExists) {
-        labelsToUse.push(dashboardLabel);
-      }
+      // Label should already be created by initializeLabels()
+      // Just add it to the list for the dashboard issue
+      labelsToUse.push(dashboardLabel);
     }
     return labelsToUse;
   }
