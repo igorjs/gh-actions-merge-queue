@@ -859,19 +859,52 @@ function createDashboardOperations(
     }
   }
 
-  async function pinIssue(_issueNumber: number): Promise<void> {
-    // Note: GitHub's pinIssue API may not be available in all Octokit versions
-    // Skipping pin functionality for now to avoid TypeScript errors
+  async function pinIssue(issueNumber: number): Promise<void> {
     if (!dashboardPin) return;
-    // try {
-    //   await octokit.rest.issues.pinIssue({
-    //     owner,
-    //     repo,
-    //     issue_number: issueNumber,
-    //   });
-    // } catch {
-    //   // Ignore pin errors
-    // }
+    try {
+      await octokit.graphql(
+        `mutation($input: PinIssueInput!) {
+          pinIssue(input: $input) {
+            issue {
+              id
+            }
+          }
+        }`,
+        {
+          input: {
+            issueId: await getIssueNodeId(issueNumber),
+          },
+        }
+      );
+      core.info(`Pinned dashboard issue #${issueNumber}`);
+    } catch (e) {
+      const errorMessage = getErrorMessage(e);
+      core.warning(`Failed to pin issue #${issueNumber}: ${errorMessage}`);
+    }
+  }
+
+  async function lockIssue(issueNumber: number): Promise<void> {
+    try {
+      await octokit.rest.issues.lock({
+        owner,
+        repo,
+        issue_number: issueNumber,
+        lock_reason: "resolved",
+      });
+      core.info(`Locked dashboard issue #${issueNumber}`);
+    } catch (e) {
+      const errorMessage = getErrorMessage(e);
+      core.warning(`Failed to lock issue #${issueNumber}: ${errorMessage}`);
+    }
+  }
+
+  async function getIssueNodeId(issueNumber: number): Promise<string> {
+    const { data } = await octokit.rest.issues.get({
+      owner,
+      repo,
+      issue_number: issueNumber,
+    });
+    return data.node_id;
   }
 
   async function updateExistingIssue(
@@ -885,6 +918,7 @@ function createDashboardOperations(
       body,
     });
     await pinIssue(issueNumber);
+    await lockIssue(issueNumber);
   }
 
   async function createNewIssue(body: string, labels: string[]): Promise<void> {
@@ -897,6 +931,7 @@ function createDashboardOperations(
         labels,
       });
       await pinIssue(created.data.number);
+      await lockIssue(created.data.number);
     } catch {
       try {
         const created = await octokit.rest.issues.create({
@@ -906,6 +941,7 @@ function createDashboardOperations(
           body,
         });
         await pinIssue(created.data.number);
+        await lockIssue(created.data.number);
       } catch (e2) {
         const errorMessage = getErrorMessage(e2);
         core.warning(`Failed to create dashboard issue: ${errorMessage}`);

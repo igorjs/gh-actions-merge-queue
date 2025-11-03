@@ -12,7 +12,24 @@ This repository provides a GitHub composite action that implements a **merge que
 
 ## Installation
 
-Add the action to your workflow by referencing the tag in your repository. Make sure your repository’s **Settings → Branch protection** requires the custom status set in `status_context` (default `merge‑queue`) and disables **“Require branches to be up to date with base”**.
+Add the action to your workflow by referencing the tag in your repository. Make sure your repository's **Settings → Branch protection** requires the custom status set in `status_context` (default `merge‑queue`) and disables **"Require branches to be up to date with base"**.
+
+### Required Permissions
+
+The action requires the following GitHub token permissions:
+
+* **contents: write** – Create and update queue staging branches
+* **pull-requests: write** – Update PR statuses and branches
+* **statuses: write** – Set commit statuses for queue validation
+* **issues: write** – Create/update dashboard issue, create labels, pin and lock dashboard
+
+### Auto-Created Resources
+
+On first run, the action automatically creates:
+
+* **Labels** – `mq/queued`, `mq/staging`, `mq/testing`, `mq/conflict`, `mq/fastlane`, `mq/hold`, `mq/ready`, `mq/failed`, and `merge-queue-dashboard`
+* **Dashboard Issue** – A pinned and locked issue displaying the current queue state (when `enable_queue_tracking` is enabled)
+* **State Branch** – A branch to persist queue state between workflow runs
 
 ### Example: shadow mode
 
@@ -29,6 +46,7 @@ permissions:
   contents: write
   pull-requests: write
   statuses: write
+  issues: write
 
 concurrency:
   group: merge-queue
