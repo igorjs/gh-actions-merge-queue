@@ -1,0 +1,17 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        uses: rhysd/actionlint@v1
+      - name: Validate action.yml
+        run: |
+          test -f action.yml || (echo "action.yml missing" && exit 1)
+          grep -q "runs:" action.yml

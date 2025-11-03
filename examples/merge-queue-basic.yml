@@ -1,0 +1,37 @@
+name: Merge Queue (shadow)
+on:
+  pull_request:
+    types:
+      [
+        opened,
+        reopened,
+        ready_for_review,
+        synchronize,
+        converted_to_draft,
+        review_requested,
+      ]
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: merge-queue
+  cancel-in-progress: true
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: igorjs/gh-actions-merge-queue@v1
+        with:
+          base_branch: main
+          mode: shadow
+          merge_method: merge
+          status_context: merge-queue
+          behind_max_commits: "100"
+          fastlane_matchers: "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:"

@@ -1,0 +1,26 @@
+name: Release
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  retag-major:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Move major tag (v1 → latest)
+        env:
+          TAG_REF: ${{ github.ref_name }} # e.g. v1.3.0
+        run: |
+          set -euo pipefail
+          git config user.name  "release[bot]"
+          git config user.email "release[bot]@users.noreply.github.com"
+          [[ "$TAG_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Not a semver tag"; exit 1; }
+          MAJOR="${TAG_REF%%.*}"            # v1
+          git tag -f "$MAJOR" "$TAG_REF"
+          git push -f origin "$MAJOR"
