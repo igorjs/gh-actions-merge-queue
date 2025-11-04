@@ -191,7 +191,7 @@ function readConfig(): Config {
     mode: getLowercaseInput("mode", "shadow"),
     fastlaneMatchersInput: getStringInput(
       "fastlane_matchers",
-      "^(hotfix|critical|security)/,\bhotfix\b,^hotfix:",
+      "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:",
     ),
     behindMaxCommits: getIntInput("behind_max_commits", 100),
     mergeMethod: getLowercaseInput("merge_method", "merge"),
