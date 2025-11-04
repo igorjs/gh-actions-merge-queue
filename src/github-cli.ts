@@ -57,37 +57,6 @@ export interface FileContent {
 }
 
 /**
- * Error type for exec errors
- */
-interface ExecError extends Error {
-  exitCode?: number;
-  stderr?: string;
-}
-
-/**
- * Helper: Check if error is from exec
- */
-function isExecError(error: unknown): error is ExecError {
-  return error instanceof Error && ('exitCode' in error || 'stderr' in error);
-}
-
-/**
- * Helper: Parse HTTP status code from gh CLI error output
- */
-function parseHttpStatus(error: ExecError): number | null {
-  const message = error.message || error.stderr || '';
-
-  // Common patterns in gh CLI errors
-  if (message.includes('404') || message.includes('Not Found')) return 404;
-  if (message.includes('409') || message.includes('Conflict')) return 409;
-  if (message.includes('422') || message.includes('Unprocessable')) return 422;
-  if (message.includes('403') || message.includes('Forbidden')) return 403;
-  if (message.includes('401') || message.includes('Unauthorized')) return 401;
-
-  return null;
-}
-
-/**
  * Helper: Execute gh command and return stdout
  */
 async function execGh(args: string[]): Promise<string> {
@@ -318,7 +287,7 @@ export async function getPullRequest(
   const output = await execGh([
     'pr', 'view', prNumber.toString(),
     '--repo', `${owner}/${repo}`,
-    '--json', 'number,title,author,createdAt,headRefName,headRepositoryOwner,draft,mergeStateStatus',
+    '--json', 'number,title,author,createdAt,headRefName,headRefOid,headRepositoryOwner,draft,mergeStateStatus',
   ]);
 
   const pr = JSON.parse(output);
@@ -331,7 +300,7 @@ export async function getPullRequest(
     created_at: pr.createdAt,
     head: {
       ref: pr.headRefName,
-      sha: '', // Not available in basic PR view, would need separate call
+      sha: pr.headRefOid,
       repo: pr.headRepositoryOwner ? { owner: { login: pr.headRepositoryOwner.login } } : null,
     },
     draft: pr.draft,
@@ -457,7 +426,8 @@ export async function deleteRef(
     });
   } catch (e) {
     // Ignore 404 errors (branch doesn't exist)
-    if (isExecError(e) && parseHttpStatus(e) === 404) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes('404') || message.includes('Not Found')) {
       return;
     }
     throw e;
@@ -526,7 +496,8 @@ export async function mergeBranches(
     });
     return { sha: output, conflict: false };
   } catch (e) {
-    if (isExecError(e) && parseHttpStatus(e) === 409) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (message.includes('409') || message.includes('Conflict')) {
       return { sha: null, conflict: true };
     }
     throw e;

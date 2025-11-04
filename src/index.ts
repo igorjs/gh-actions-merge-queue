@@ -89,16 +89,212 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// ============================================================================
+// VALIDATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Validate GitHub token
+ */
+function validateToken(token: string): void {
+  if (!token) {
+    throw new Error(
+      `No GitHub token provided. Set the "token" input or ensure GITHUB_TOKEN is available.\n` +
+      `Add to your workflow:\n` +
+      `  with:\n` +
+      `    token: \${{ secrets.GITHUB_TOKEN }}`
+    );
+  }
+
+  if (token.length < 20) {
+    throw new Error(
+      `Invalid GitHub token: Token appears too short (${token.length} characters). ` +
+      `GitHub tokens are typically 40+ characters.`
+    );
+  }
+
+  const placeholders = ['YOUR_TOKEN', 'TOKEN', 'PLACEHOLDER', '<token>'];
+  if (placeholders.some(p => token.toUpperCase().includes(p))) {
+    throw new Error(
+      `Invalid GitHub token: Token appears to be a placeholder value. Use a real GitHub token.`
+    );
+  }
+}
+
+/**
+ * Validate branch name follows Git naming rules
+ */
+function validateBranchName(name: string, inputName: string): void {
+  if (!name || name.trim() === '') {
+    throw new Error(`Invalid '${inputName}': Branch name cannot be empty.`);
+  }
+
+  const invalidPatterns = [
+    { pattern: /^\./, message: 'cannot start with a dot' },
+    { pattern: /\.\.$/, message: 'cannot end with ".."' },
+    { pattern: /\.lock$/, message: 'cannot end with ".lock"' },
+    { pattern: /@\{/, message: 'cannot contain "@{"' },
+    { pattern: /\\/, message: 'cannot contain backslash' },
+    { pattern: /[\x00-\x1f\x7f]/, message: 'cannot contain control characters' },
+    { pattern: /\s/, message: 'cannot contain spaces' },
+    { pattern: /[~^:?*\[]/, message: 'cannot contain special characters (~^:?*[)' },
+    { pattern: /\/\//, message: 'cannot contain consecutive slashes' },
+    { pattern: /^\/|\/$/, message: 'cannot start or end with slash' },
+  ];
+
+  for (const { pattern, message } of invalidPatterns) {
+    if (pattern.test(name)) {
+      throw new Error(`Invalid '${inputName}' value: "${name}". Branch name ${message}.`);
+    }
+  }
+}
+
+/**
+ * Validate mode input
+ */
+function validateMode(value: string): 'shadow' | 'live' {
+  const normalized = value.toLowerCase();
+  if (normalized !== 'shadow' && normalized !== 'live') {
+    throw new Error(
+      `Invalid 'mode' value: "${value}". Must be either 'shadow' or 'live'.\n` +
+      `  - 'shadow': Stages changes and reports status but never merges PRs\n` +
+      `  - 'live': Merges successfully tested PRs`
+    );
+  }
+  return normalized as 'shadow' | 'live';
+}
+
+/**
+ * Validate merge method input
+ */
+function validateMergeMethod(value: string): 'merge' | 'squash' | 'rebase' {
+  const normalized = value.toLowerCase();
+  if (normalized !== 'merge' && normalized !== 'squash' && normalized !== 'rebase') {
+    throw new Error(
+      `Invalid 'merge_method' value: "${value}". Must be one of: 'merge', 'squash', or 'rebase'.\n` +
+      `  - 'merge': Creates a merge commit (recommended)\n` +
+      `  - 'squash': Squashes all commits into one\n` +
+      `  - 'rebase': Rebases and merges`
+    );
+  }
+  return normalized as 'merge' | 'squash' | 'rebase';
+}
+
+/**
+ * Validate behind_max_commits input
+ */
+function validateBehindMaxCommits(value: number, input: string): void {
+  if (isNaN(value)) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: "${input}". Must be a non-negative integer (e.g., 0, 10, 100).`
+    );
+  }
+  if (value < 0) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: ${value}. Must be non-negative (>= 0). Use 0 to disable auto-updating.`
+    );
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: ${value}. Must be an integer, not a decimal.`
+    );
+  }
+}
+
+/**
+ * Validate fastlane matchers and return compiled regexes
+ */
+function validateFastlaneMatchers(input: string): RegExp[] {
+  if (!input || input.trim() === '') {
+    core.info('No fastlane matchers configured. All PRs will use the normal queue.');
+    return [];
+  }
+
+  const patterns = input.split(',').map(s => s.trim()).filter(Boolean);
+  if (patterns.length === 0) {
+    core.info('No fastlane matchers configured. All PRs will use the normal queue.');
+    return [];
+  }
+
+  const regexes: RegExp[] = [];
+  const errors: string[] = [];
+
+  for (const pattern of patterns) {
+    try {
+      regexes.push(new RegExp(pattern, 'i'));
+    } catch (e) {
+      errors.push(`  - "${pattern}": ${getErrorMessage(e)}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    if (errors.length === patterns.length) {
+      throw new Error(
+        `All 'fastlane_matchers' patterns are invalid:\n${errors.join('\n')}\n\n` +
+        `Patterns must be valid JavaScript RegExp syntax without surrounding slashes.\n` +
+        `Examples: "^hotfix/", "\\\\bURGENT\\\\b", "^security-patch-"`
+      );
+    } else {
+      core.warning(
+        `Some 'fastlane_matchers' patterns are invalid and will be ignored:\n${errors.join('\n')}`
+      );
+    }
+  }
+
+  core.info(`Configured ${regexes.length} fastlane matcher(s).`);
+  return regexes;
+}
+
+/**
+ * Validate branch name conflicts
+ */
+function validateBranchNameConflicts(branches: {
+  baseBranch: string;
+  queueBranch: string;
+  fastlaneBranch: string;
+  stateBranch: string;
+}): void {
+  const branchList = [
+    { name: branches.baseBranch, input: 'base_branch' },
+    { name: branches.queueBranch, input: 'queue_branch' },
+    { name: branches.fastlaneBranch, input: 'fastlane_branch' },
+    { name: branches.stateBranch, input: 'state_branch' },
+  ];
+
+  const seen = new Map<string, string>();
+  for (const { name, input } of branchList) {
+    if (seen.has(name)) {
+      throw new Error(
+        `Branch name conflict: '${input}' and '${seen.get(name)}' both use "${name}". ` +
+        `Each branch configuration must use a unique branch name.`
+      );
+    }
+    seen.set(name, input);
+  }
+
+  if (branches.queueBranch === branches.baseBranch) {
+    throw new Error(
+      `Invalid configuration: 'queue_branch' cannot be the same as 'base_branch' ("${branches.baseBranch}").`
+    );
+  }
+
+  if (branches.fastlaneBranch === branches.baseBranch) {
+    throw new Error(
+      `Invalid configuration: 'fastlane_branch' cannot be the same as 'base_branch' ("${branches.baseBranch}").`
+    );
+  }
+}
+
+// ============================================================================
+// INPUT PARSING FUNCTIONS
+// ============================================================================
+
 /**
  * Get and validate token
  */
 function getToken(): string {
   const token = core.getInput("token") || process.env.GITHUB_TOKEN || "";
-  if (!token) {
-    throw new Error(
-      'No GitHub token provided. Set the "token" input or rely on GITHUB_TOKEN.',
-    );
-  }
+  validateToken(token);
   return token;
 }
 
@@ -183,47 +379,67 @@ function readProjectConfig() {
  * Read configuration from action inputs
  */
 function readConfig(): Config {
+  // Read raw inputs
+  const branchConfig = readBranchConfig();
+  const dashboardConfig = readDashboardConfig();
+  const projectConfig = readProjectConfig();
+
+  const modeRaw = getLowercaseInput("mode", "shadow");
+  const mergeMethodRaw = getLowercaseInput("merge_method", "merge");
+  const behindMaxCommitsRaw = core.getInput("behind_max_commits") || "100";
+
+  // Validate branch names
+  validateBranchName(branchConfig.baseBranch, 'base_branch');
+  validateBranchName(branchConfig.queueBranch, 'queue_branch');
+  validateBranchName(branchConfig.fastlaneBranch, 'fastlane_branch');
+  validateBranchName(branchConfig.stateBranch, 'state_branch');
+
+  // Validate branch conflicts
+  validateBranchNameConflicts(branchConfig);
+
+  // Validate and parse numeric inputs
+  const behindMaxCommits = parseInt(behindMaxCommitsRaw, 10);
+  validateBehindMaxCommits(behindMaxCommits, behindMaxCommitsRaw);
+
+  // Validate enum inputs
+  const mode = validateMode(modeRaw);
+  const mergeMethod = validateMergeMethod(mergeMethodRaw);
+
   return {
     token: getToken(),
-    ...readBranchConfig(),
+    ...branchConfig,
     queueFile: getStringInput("queue_file", ".github/merge-queue-queue.json"),
     statusContext: getStringInput("status_context", "merge-queue"),
-    mode: getLowercaseInput("mode", "shadow"),
+    mode,
     fastlaneMatchersInput: getStringInput(
       "fastlane_matchers",
       "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:",
     ),
-    behindMaxCommits: getIntInput("behind_max_commits", 100),
-    mergeMethod: getLowercaseInput("merge_method", "merge"),
+    behindMaxCommits,
+    mergeMethod,
     cleanQueue: getBooleanInput("clean_queue", true),
     enableQueueTracking: getBooleanInput("enable_queue_tracking", true),
-    ...readDashboardConfig(),
-    ...readProjectConfig(),
+    ...dashboardConfig,
+    ...projectConfig,
   };
 }
 
 /**
- * Create fastlane regex matchers from input string
- */
-function createFastlaneMatchers(input: string): RegExp[] {
-  return (input || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((pattern) => {
-      try {
-        return new RegExp(pattern, "i");
-      } catch (e) {
-        const errorMessage = getErrorMessage(e);
-        core.warning(`Invalid fastlane pattern "${pattern}": ${errorMessage}`);
-        return null;
-      }
-    })
-    .filter((x): x is RegExp => x !== null);
-}
-
-/**
- * Determine if a PR qualifies for the fastlane based on its branch name or title.
+ * Determine if a PR qualifies for the fastlane based on its branch name or title
+ *
+ * Fastlane PRs bypass the FIFO queue and are processed immediately. This is
+ * typically used for hotfixes, security patches, or critical bug fixes.
+ *
+ * @param pr - Pull request object with headRefName and/or title
+ * @param fastlaneRegexes - Array of compiled regex patterns to match against
+ * @returns true if the PR's branch name or title matches any fastlane pattern
+ *
+ * @example
+ * ```typescript
+ * const regexes = [/^hotfix\//, /^security\//];
+ * const pr = { headRefName: 'hotfix/critical-bug', title: 'Fix critical issue' };
+ * isFastlane(pr, regexes); // returns true
+ * ```
  */
 function isFastlane(
   pr: { headRefName?: string; title?: string },
@@ -307,7 +523,7 @@ async function run() {
   try {
     const { owner, repo } = github.context.repo;
     const config = readConfig();
-    const fastlaneRegexes = createFastlaneMatchers(
+    const fastlaneRegexes = validateFastlaneMatchers(
       config.fastlaneMatchersInput,
     );
 
@@ -694,6 +910,23 @@ function createDashboardOperations(
 
 /**
  * Execute the main queue workflow
+ *
+ * This is the core orchestration function that implements the merge queue algorithm.
+ * It performs the following steps:
+ * 1. Reads the current queue state from the state branch
+ * 2. Fetches all open PRs and filters for eligible candidates (approved, not draft, no conflicts)
+ * 3. Identifies fastlane candidates based on configured regex patterns
+ * 4. Updates the queue with eligible PRs (FIFO order)
+ * 5. Selects the next candidate (fastlane takes priority over queue head)
+ * 6. Processes the candidate through staging and testing
+ * 7. Updates the dashboard with current queue state
+ *
+ * @param config - Configuration object containing all action inputs
+ * @param fastlaneRegexes - Compiled regex patterns for identifying fastlane PRs
+ * @param branchOps - Branch operation helpers (create, update, delete branches)
+ * @param queueOps - Queue state management helpers (read/write queue)
+ * @param prOps - Pull request operation helpers (fetch, update, stage, status)
+ * @param dashboardOps - Dashboard management helpers (upsert issue)
  */
 async function executeQueueWorkflow(
   config: Config,
@@ -786,7 +1019,27 @@ async function updateDashboard(
 }
 
 /**
- * Process a candidate PR
+ * Process a candidate PR through the merge queue workflow
+ *
+ * This function handles the complete lifecycle of testing a PR:
+ * 1. Updates the PR branch if it's behind the base branch (optional)
+ * 2. Sets commit status to "pending" to indicate queueing
+ * 3. Stages the PR on the appropriate branch (fastlane or regular queue)
+ * 4. Handles three possible outcomes:
+ *    - Conflict: Comments on PR and sets status to "failure"
+ *    - Base moved: Defers processing to next run with "pending" status
+ *    - Success: Merges in live mode or sets "success" status in shadow mode
+ * 5. Updates the dashboard with current queue state
+ *
+ * @param candidate - The PR node to process
+ * @param isFastCandidate - Whether this PR is on the fastlane track
+ * @param queue - Current queue array of PR numbers
+ * @param queueSha - SHA of the queue file for optimistic locking
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
+ * @param dashboardOps - Dashboard management helpers
  */
 async function processCandidate(
   candidate: PullRequestNode,
@@ -854,7 +1107,22 @@ async function processCandidate(
 }
 
 /**
- * Handle merge conflict scenario
+ * Handle a merge conflict scenario
+ *
+ * When a PR cannot be merged cleanly with the base branch, this function:
+ * 1. Comments on the PR to notify the author
+ * 2. Sets commit status to "failure"
+ * 3. Optionally cleans up the staging branch
+ *
+ * The PR remains in the queue but will fail staging on each attempt until
+ * the author resolves conflicts by rebasing or merging the base branch.
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param trainBranch - Staging branch name
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleConflict(
   prNumber: number,
@@ -874,7 +1142,17 @@ async function handleConflict(
 }
 
 /**
- * Handle base moved scenario
+ * Handle scenario where base branch moved during testing
+ *
+ * If the base branch receives new commits while a PR is being staged/tested,
+ * we defer processing to the next workflow run to ensure the PR is tested
+ * against the latest base. This prevents merging stale code.
+ *
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param trainBranch - Staging branch name
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleBaseMoved(
   prHeadSha: string,
@@ -892,7 +1170,24 @@ async function handleBaseMoved(
 }
 
 /**
- * Handle success scenario
+ * Handle successful staging scenario
+ *
+ * When a PR successfully stages without conflicts and the base hasn't moved:
+ * - In live mode: Actually merges the PR to the base branch
+ * - In shadow mode: Sets success status without merging (for testing)
+ *
+ * Optionally cleans up the staging branch after processing.
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param isFastCandidate - Whether this is a fastlane PR
+ * @param trainBranch - Staging branch name
+ * @param queue - Current queue array
+ * @param queueSha - SHA of the queue file
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleSuccess(
   prNumber: number,
@@ -933,7 +1228,20 @@ async function handleSuccess(
 }
 
 /**
- * Merge PR in live mode
+ * Merge a PR in live mode
+ *
+ * Performs the actual merge operation using the configured merge method
+ * (merge or squash). On success, sets commit status to "success" and removes
+ * the PR from the queue (unless it's a fastlane PR).
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param isFastCandidate - Whether this is a fastlane PR (not removed from queue)
+ * @param queue - Current queue array
+ * @param queueSha - SHA of the queue file
+ * @param config - Configuration object
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
  */
 async function mergePR(
   prNumber: number,
