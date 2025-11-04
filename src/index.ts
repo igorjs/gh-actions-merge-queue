@@ -4,6 +4,7 @@
 
 import * as core from "@actions/core";
 import * as github from "@actions/github";
+import * as gh from "./github-cli";
 
 /**
  * Type definitions
@@ -17,14 +18,6 @@ interface PullRequestNode {
   headRefOid: string;
   reviewDecision: string | null;
   mergeable: string;
-}
-
-interface GraphQLPRResponse {
-  repository: {
-    pullRequests: {
-      nodes: PullRequestNode[];
-    };
-  };
 }
 
 interface QueueData {
@@ -49,11 +42,6 @@ interface PrDetail {
 interface StageResult {
   stagedSha: string | null;
   conflict: boolean;
-}
-
-interface OctokitError {
-  status?: number;
-  message?: string;
 }
 
 interface GithubLabel {
@@ -92,39 +80,221 @@ interface Config {
 }
 
 /**
- * Helper function to check if an error is an Octokit error with a status
- */
-function isOctokitError(error: unknown): error is OctokitError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    ("status" in error || "message" in error)
-  );
-}
-
-/**
  * Helper function to get error message from unknown error
  */
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
-  if (isOctokitError(error) && error.message) {
-    return error.message;
-  }
   return String(error);
 }
+
+// ============================================================================
+// VALIDATION FUNCTIONS
+// ============================================================================
+
+/**
+ * Validate GitHub token
+ */
+function validateToken(token: string): void {
+  if (!token) {
+    throw new Error(
+      `No GitHub token provided. Set the "token" input or ensure GITHUB_TOKEN is available.\n` +
+      `Add to your workflow:\n` +
+      `  with:\n` +
+      `    token: \${{ secrets.GITHUB_TOKEN }}`
+    );
+  }
+
+  if (token.length < 20) {
+    throw new Error(
+      `Invalid GitHub token: Token appears too short (${token.length} characters). ` +
+      `GitHub tokens are typically 40+ characters.`
+    );
+  }
+
+  const placeholders = ['YOUR_TOKEN', 'TOKEN', 'PLACEHOLDER', '<token>'];
+  if (placeholders.some(p => token.toUpperCase().includes(p))) {
+    throw new Error(
+      `Invalid GitHub token: Token appears to be a placeholder value. Use a real GitHub token.`
+    );
+  }
+}
+
+/**
+ * Validate branch name follows Git naming rules
+ */
+function validateBranchName(name: string, inputName: string): void {
+  if (!name || name.trim() === '') {
+    throw new Error(`Invalid '${inputName}': Branch name cannot be empty.`);
+  }
+
+  const invalidPatterns = [
+    { pattern: /^\./, message: 'cannot start with a dot' },
+    { pattern: /\.\.$/, message: 'cannot end with ".."' },
+    { pattern: /\.lock$/, message: 'cannot end with ".lock"' },
+    { pattern: /@\{/, message: 'cannot contain "@{"' },
+    { pattern: /\\/, message: 'cannot contain backslash' },
+    { pattern: /[\x00-\x1f\x7f]/, message: 'cannot contain control characters' },
+    { pattern: /\s/, message: 'cannot contain spaces' },
+    { pattern: /[~^:?*\[]/, message: 'cannot contain special characters (~^:?*[)' },
+    { pattern: /\/\//, message: 'cannot contain consecutive slashes' },
+    { pattern: /^\/|\/$/, message: 'cannot start or end with slash' },
+  ];
+
+  for (const { pattern, message } of invalidPatterns) {
+    if (pattern.test(name)) {
+      throw new Error(`Invalid '${inputName}' value: "${name}". Branch name ${message}.`);
+    }
+  }
+}
+
+/**
+ * Validate mode input
+ */
+function validateMode(value: string): 'shadow' | 'live' {
+  const normalized = value.toLowerCase();
+  if (normalized !== 'shadow' && normalized !== 'live') {
+    throw new Error(
+      `Invalid 'mode' value: "${value}". Must be either 'shadow' or 'live'.\n` +
+      `  - 'shadow': Stages changes and reports status but never merges PRs\n` +
+      `  - 'live': Merges successfully tested PRs`
+    );
+  }
+  return normalized as 'shadow' | 'live';
+}
+
+/**
+ * Validate merge method input
+ */
+function validateMergeMethod(value: string): 'merge' | 'squash' | 'rebase' {
+  const normalized = value.toLowerCase();
+  if (normalized !== 'merge' && normalized !== 'squash' && normalized !== 'rebase') {
+    throw new Error(
+      `Invalid 'merge_method' value: "${value}". Must be one of: 'merge', 'squash', or 'rebase'.\n` +
+      `  - 'merge': Creates a merge commit (recommended)\n` +
+      `  - 'squash': Squashes all commits into one\n` +
+      `  - 'rebase': Rebases and merges`
+    );
+  }
+  return normalized as 'merge' | 'squash' | 'rebase';
+}
+
+/**
+ * Validate behind_max_commits input
+ */
+function validateBehindMaxCommits(value: number, input: string): void {
+  if (isNaN(value)) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: "${input}". Must be a non-negative integer (e.g., 0, 10, 100).`
+    );
+  }
+  if (value < 0) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: ${value}. Must be non-negative (>= 0). Use 0 to disable auto-updating.`
+    );
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `Invalid 'behind_max_commits' value: ${value}. Must be an integer, not a decimal.`
+    );
+  }
+}
+
+/**
+ * Validate fastlane matchers and return compiled regexes
+ */
+function validateFastlaneMatchers(input: string): RegExp[] {
+  if (!input || input.trim() === '') {
+    core.info('No fastlane matchers configured. All PRs will use the normal queue.');
+    return [];
+  }
+
+  const patterns = input.split(',').map(s => s.trim()).filter(Boolean);
+  if (patterns.length === 0) {
+    core.info('No fastlane matchers configured. All PRs will use the normal queue.');
+    return [];
+  }
+
+  const regexes: RegExp[] = [];
+  const errors: string[] = [];
+
+  for (const pattern of patterns) {
+    try {
+      regexes.push(new RegExp(pattern, 'i'));
+    } catch (e) {
+      errors.push(`  - "${pattern}": ${getErrorMessage(e)}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    if (errors.length === patterns.length) {
+      throw new Error(
+        `All 'fastlane_matchers' patterns are invalid:\n${errors.join('\n')}\n\n` +
+        `Patterns must be valid JavaScript RegExp syntax without surrounding slashes.\n` +
+        `Examples: "^hotfix/", "\\\\bURGENT\\\\b", "^security-patch-"`
+      );
+    } else {
+      core.warning(
+        `Some 'fastlane_matchers' patterns are invalid and will be ignored:\n${errors.join('\n')}`
+      );
+    }
+  }
+
+  core.info(`Configured ${regexes.length} fastlane matcher(s).`);
+  return regexes;
+}
+
+/**
+ * Validate branch name conflicts
+ */
+function validateBranchNameConflicts(branches: {
+  baseBranch: string;
+  queueBranch: string;
+  fastlaneBranch: string;
+  stateBranch: string;
+}): void {
+  const branchList = [
+    { name: branches.baseBranch, input: 'base_branch' },
+    { name: branches.queueBranch, input: 'queue_branch' },
+    { name: branches.fastlaneBranch, input: 'fastlane_branch' },
+    { name: branches.stateBranch, input: 'state_branch' },
+  ];
+
+  const seen = new Map<string, string>();
+  for (const { name, input } of branchList) {
+    if (seen.has(name)) {
+      throw new Error(
+        `Branch name conflict: '${input}' and '${seen.get(name)}' both use "${name}". ` +
+        `Each branch configuration must use a unique branch name.`
+      );
+    }
+    seen.set(name, input);
+  }
+
+  if (branches.queueBranch === branches.baseBranch) {
+    throw new Error(
+      `Invalid configuration: 'queue_branch' cannot be the same as 'base_branch' ("${branches.baseBranch}").`
+    );
+  }
+
+  if (branches.fastlaneBranch === branches.baseBranch) {
+    throw new Error(
+      `Invalid configuration: 'fastlane_branch' cannot be the same as 'base_branch' ("${branches.baseBranch}").`
+    );
+  }
+}
+
+// ============================================================================
+// INPUT PARSING FUNCTIONS
+// ============================================================================
 
 /**
  * Get and validate token
  */
 function getToken(): string {
   const token = core.getInput("token") || process.env.GITHUB_TOKEN || "";
-  if (!token) {
-    throw new Error(
-      'No GitHub token provided. Set the "token" input or rely on GITHUB_TOKEN.'
-    );
-  }
+  validateToken(token);
   return token;
 }
 
@@ -174,7 +344,7 @@ function readBranchConfig() {
 function readDashboardConfig() {
   return {
     dashboardTitle: getStringInput("dashboard_title", "Merge Queue Dashboard"),
-    dashboardLabel: getStringInput("dashboard_label", "merge-queue-dashboard"),
+    dashboardLabel: getStringInput("dashboard_label", "mq/dashboard"),
     dashboardPin: getBooleanInput("dashboard_pin", true),
     dashboardScanOpenIssues: getIntInput("dashboard_scan_open_issues", 100),
   };
@@ -196,11 +366,11 @@ function readProjectConfig() {
     projectTitle: getStringInput("project_title", "Merge Queue"),
     projectStatusFieldName: getStringInput(
       "project_status_field_name",
-      "Status"
+      "Status",
     ),
     projectQueuePosFieldName: getStringInput(
       "project_queuepos_field_name",
-      "Queue Position"
+      "Queue Position",
     ),
   };
 }
@@ -209,51 +379,71 @@ function readProjectConfig() {
  * Read configuration from action inputs
  */
 function readConfig(): Config {
+  // Read raw inputs
+  const branchConfig = readBranchConfig();
+  const dashboardConfig = readDashboardConfig();
+  const projectConfig = readProjectConfig();
+
+  const modeRaw = getLowercaseInput("mode", "shadow");
+  const mergeMethodRaw = getLowercaseInput("merge_method", "merge");
+  const behindMaxCommitsRaw = core.getInput("behind_max_commits") || "100";
+
+  // Validate branch names
+  validateBranchName(branchConfig.baseBranch, 'base_branch');
+  validateBranchName(branchConfig.queueBranch, 'queue_branch');
+  validateBranchName(branchConfig.fastlaneBranch, 'fastlane_branch');
+  validateBranchName(branchConfig.stateBranch, 'state_branch');
+
+  // Validate branch conflicts
+  validateBranchNameConflicts(branchConfig);
+
+  // Validate and parse numeric inputs
+  const behindMaxCommits = parseInt(behindMaxCommitsRaw, 10);
+  validateBehindMaxCommits(behindMaxCommits, behindMaxCommitsRaw);
+
+  // Validate enum inputs
+  const mode = validateMode(modeRaw);
+  const mergeMethod = validateMergeMethod(mergeMethodRaw);
+
   return {
     token: getToken(),
-    ...readBranchConfig(),
+    ...branchConfig,
     queueFile: getStringInput("queue_file", ".github/merge-queue-queue.json"),
     statusContext: getStringInput("status_context", "merge-queue"),
-    mode: getLowercaseInput("mode", "shadow"),
+    mode,
     fastlaneMatchersInput: getStringInput(
       "fastlane_matchers",
-      "^(hotfix|critical|security)/,\bhotfix\b,^hotfix:"
+      "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:",
     ),
-    behindMaxCommits: getIntInput("behind_max_commits", 100),
-    mergeMethod: getLowercaseInput("merge_method", "merge"),
+    behindMaxCommits,
+    mergeMethod,
     cleanQueue: getBooleanInput("clean_queue", true),
     enableQueueTracking: getBooleanInput("enable_queue_tracking", true),
-    ...readDashboardConfig(),
-    ...readProjectConfig(),
+    ...dashboardConfig,
+    ...projectConfig,
   };
 }
 
 /**
- * Create fastlane regex matchers from input string
- */
-function createFastlaneMatchers(input: string): RegExp[] {
-  return (input || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((pattern) => {
-      try {
-        return new RegExp(pattern, "i");
-      } catch (e) {
-        const errorMessage = getErrorMessage(e);
-        core.warning(`Invalid fastlane pattern "${pattern}": ${errorMessage}`);
-        return null;
-      }
-    })
-    .filter((x): x is RegExp => x !== null);
-}
-
-/**
- * Determine if a PR qualifies for the fastlane based on its branch name or title.
+ * Determine if a PR qualifies for the fastlane based on its branch name or title
+ *
+ * Fastlane PRs bypass the FIFO queue and are processed immediately. This is
+ * typically used for hotfixes, security patches, or critical bug fixes.
+ *
+ * @param pr - Pull request object with headRefName and/or title
+ * @param fastlaneRegexes - Array of compiled regex patterns to match against
+ * @returns true if the PR's branch name or title matches any fastlane pattern
+ *
+ * @example
+ * ```typescript
+ * const regexes = [/^hotfix\//, /^security\//];
+ * const pr = { headRefName: 'hotfix/critical-bug', title: 'Fix critical issue' };
+ * isFastlane(pr, regexes); // returns true
+ * ```
  */
 function isFastlane(
   pr: { headRefName?: string; title?: string },
-  fastlaneRegexes: RegExp[]
+  fastlaneRegexes: RegExp[],
 ): boolean {
   if (!fastlaneRegexes.length) return false;
   const name = pr.headRefName || "";
@@ -281,6 +471,48 @@ function renderQueueMarkdown(rows: PrDetail[], baseBranch: string): string {
 }
 
 /**
+ * Initialize required labels for merge queue operations
+ */
+async function initializeLabels(
+  owner: string,
+  repo: string,
+): Promise<void> {
+  const labels = [
+    { name: "mq/dashboard", description: "Label for the merge queue dashboard issue", color: "0E8A16" },
+    { name: "mq/queued", description: "PR is in the merge queue", color: "0366d6" },
+    { name: "mq/staging", description: "PR is being staged for testing", color: "fbca04" },
+    { name: "mq/testing", description: "PR is being tested in the queue", color: "d4c5f9" },
+    { name: "mq/conflict", description: "PR has merge conflicts", color: "d73a4a" },
+    { name: "mq/fastlane", description: "PR is in the fastlane (hotfix) queue", color: "ff6347" },
+    { name: "mq/hold", description: "Hold PR from entering the queue", color: "e99695" },
+    { name: "mq/ready", description: "PR is ready to be queued", color: "0e8a16" },
+    { name: "mq/failed", description: "PR failed queue tests", color: "b60205" },
+  ];
+
+  try {
+    const existingLabels = await gh.listLabels(owner, repo);
+    const existingLabelNames = new Set(
+      existingLabels.map((l) => l.name.toLowerCase())
+    );
+
+    for (const label of labels) {
+      if (!existingLabelNames.has(label.name.toLowerCase())) {
+        try {
+          await gh.createLabel(owner, repo, label.name, label.description, label.color);
+          core.info(`Created label: ${label.name}`);
+        } catch (e) {
+          const errorMessage = getErrorMessage(e);
+          core.warning(`Failed to create label "${label.name}": ${errorMessage}`);
+        }
+      }
+    }
+  } catch (e) {
+    const errorMessage = getErrorMessage(e);
+    core.warning(`Failed to initialize labels: ${errorMessage}`);
+  }
+}
+
+/**
  * Merge Queue Action
  *
  * This script implements a merge queue with optional fastlane handling,
@@ -291,38 +523,37 @@ async function run() {
   try {
     const { owner, repo } = github.context.repo;
     const config = readConfig();
-    const octokit = github.getOctokit(config.token);
-    const fastlaneRegexes = createFastlaneMatchers(
-      config.fastlaneMatchersInput
+    const fastlaneRegexes = validateFastlaneMatchers(
+      config.fastlaneMatchersInput,
     );
 
+    // Initialize labels
+    await initializeLabels(owner, repo);
+
     // Initialize helper functions with context
-    const branchOps = createBranchOperations(octokit, owner, repo);
+    const branchOps = createBranchOperations(owner, repo);
     const queueOps = createQueueOperations(
-      octokit,
       owner,
       repo,
       config.stateBranch,
       config.queueFile,
       config.baseBranch,
-      branchOps
+      branchOps,
     );
     const prOps = createPROperations(
-      octokit,
       owner,
       repo,
       config.baseBranch,
       config.statusContext,
-      config.behindMaxCommits
+      config.behindMaxCommits,
     );
     const dashboardOps = createDashboardOperations(
-      octokit,
       owner,
       repo,
       config.dashboardTitle,
       config.dashboardLabel,
       config.dashboardPin,
-      config.dashboardScanOpenIssues
+      config.dashboardScanOpenIssues,
     );
 
     // Main workflow
@@ -332,7 +563,7 @@ async function run() {
       branchOps,
       queueOps,
       prOps,
-      dashboardOps
+      dashboardOps,
     );
   } catch (error) {
     const errorMessage = getErrorMessage(error);
@@ -346,55 +577,27 @@ async function run() {
  * Create branch operations
  */
 function createBranchOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
-  repo: string
+  repo: string,
 ) {
   async function getBranchSha(branch: string): Promise<string> {
-    const ref = await octokit.rest.git.getRef({
-      owner,
-      repo,
-      ref: `heads/${branch}`,
-    });
-    return ref.data.object.sha;
+    return await gh.getRef(owner, repo, branch);
   }
 
   async function ensureBranch(branch: string, sha: string): Promise<void> {
     try {
       const currentSha = await getBranchSha(branch);
       if (currentSha !== sha) {
-        await octokit.rest.git.updateRef({
-          owner,
-          repo,
-          ref: `heads/${branch}`,
-          sha,
-          force: true,
-        });
+        await gh.updateRef(owner, repo, branch, sha, true);
       }
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        await octokit.rest.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${branch}`,
-          sha,
-        });
-      } else {
-        throw e;
-      }
+      // If branch doesn't exist (404), create it
+      await gh.createRef(owner, repo, branch, sha);
     }
   }
 
   async function deleteBranch(branch: string): Promise<void> {
-    try {
-      await octokit.rest.git.deleteRef({
-        owner,
-        repo,
-        ref: `heads/${branch}`,
-      });
-    } catch {
-      // Ignore errors (e.g., 404)
-    }
+    await gh.deleteRef(owner, repo, branch);
   }
 
   return { getBranchSha, ensureBranch, deleteBranch };
@@ -404,47 +607,30 @@ function createBranchOperations(
  * Create queue operations
  */
 function createQueueOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   stateBranch: string,
   queueFile: string,
   baseBranch: string,
-  branchOps: ReturnType<typeof createBranchOperations>
+  branchOps: ReturnType<typeof createBranchOperations>,
 ) {
   async function ensureStateBranch(): Promise<void> {
     const baseSha = await branchOps.getBranchSha(baseBranch);
     try {
       await branchOps.getBranchSha(stateBranch);
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        await octokit.rest.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${stateBranch}`,
-          sha: baseSha,
-        });
-      } else {
-        throw e;
-      }
+      // If branch doesn't exist, create it
+      await gh.createRef(owner, repo, stateBranch, baseSha);
     }
   }
 
   async function fetchQueueFile(): Promise<QueueInfo> {
-    const { data } = await octokit.request(
-      "GET /repos/{owner}/{repo}/contents/{path}",
-      {
-        owner,
-        repo,
-        path: queueFile,
-        ref: stateBranch,
-      }
-    );
+    const data = await gh.getFileContents(owner, repo, queueFile, stateBranch);
 
-    if ("content" in data && typeof data.content === "string") {
+    if (data.content) {
       const content = Buffer.from(
         data.content,
-        data.encoding === "base64" ? "base64" : "utf8"
+        data.encoding === "base64" ? "base64" : "utf8",
       ).toString("utf8");
       const json = JSON.parse(content || "{}") as Partial<QueueData>;
       const queue = Array.isArray(json.queue) ? json.queue : [];
@@ -456,16 +642,16 @@ function createQueueOperations(
   async function initializeQueueFile(): Promise<QueueInfo> {
     const initial: QueueData = { version: 1, queue: [] };
     const encoded = Buffer.from(JSON.stringify(initial, null, 2)).toString(
-      "base64"
+      "base64",
     );
-    await octokit.request("PUT /repos/{owner}/{repo}/contents/{path}", {
+    await gh.putFileContents(
       owner,
       repo,
-      path: queueFile,
-      branch: stateBranch,
-      message: "merge-queue: init queue [skip ci]",
-      content: encoded,
-    });
+      queueFile,
+      stateBranch,
+      "merge-queue: init queue [skip ci]",
+      encoded,
+    );
     return { queue: [], sha: null };
   }
 
@@ -475,48 +661,31 @@ function createQueueOperations(
     try {
       return await fetchQueueFile();
     } catch (e) {
-      if (isOctokitError(e) && e.status === 404) {
-        return await initializeQueueFile();
-      }
-      throw e;
+      // If file doesn't exist, initialize it
+      return await initializeQueueFile();
     }
   }
 
   async function writeQueue(
     queue: number[],
-    sha: string | null
+    sha: string | null,
   ): Promise<string> {
     const obj: QueueData = { version: 1, queue };
     const encoded = Buffer.from(JSON.stringify(obj, null, 2)).toString(
-      "base64"
+      "base64",
     );
 
-    const params = {
+    const newSha = await gh.putFileContents(
       owner,
       repo,
-      path: queueFile,
-      branch: stateBranch,
-      message: "merge-queue: sync queue [skip ci]",
-      content: encoded,
-      ...(sha ? { sha } : {}),
-    };
-
-    const res = await octokit.request(
-      "PUT /repos/{owner}/{repo}/contents/{path}",
-      params
+      queueFile,
+      stateBranch,
+      "merge-queue: sync queue [skip ci]",
+      encoded,
+      sha || undefined,
     );
 
-    if (
-      "content" in res.data &&
-      res.data.content &&
-      typeof res.data.content === "object" &&
-      res.data.content !== null &&
-      "sha" in res.data.content &&
-      typeof res.data.content.sha === "string"
-    ) {
-      return res.data.content.sha;
-    }
-    return sha || "";
+    return newSha || sha || "";
   }
 
   return { readQueue, writeQueue };
@@ -526,77 +695,33 @@ function createQueueOperations(
  * Create PR operations
  */
 function createPROperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   baseBranch: string,
   statusContext: string,
-  behindMaxCommits: number
+  behindMaxCommits: number,
 ) {
   async function fetchOpenPRs(): Promise<PullRequestNode[]> {
-    const query = `
-        query($owner: String!, $repo: String!, $base: String!) {
-          repository(owner: $owner, name: $repo) {
-            pullRequests(states: OPEN, baseRefName: $base, first: 100, orderBy: { field: CREATED_AT, direction: ASC }) {
-              nodes {
-                createdAt
-                title
-                number
-                isDraft
-                headRefName
-                headRefOid
-                reviewDecision
-                mergeable
-              }
-            }
-          }
-        }
-      `;
-
-    const result = (await octokit.graphql(query, {
-      owner,
-      repo,
-      base: baseBranch,
-    })) as GraphQLPRResponse;
-
-    return result.repository.pullRequests.nodes || [];
+    return await gh.fetchOpenPRs(owner, repo, baseBranch);
   }
 
   async function getBehindBy(
     base: string,
-    head: string
+    head: string,
   ): Promise<number | null> {
-    try {
-      const cmp = await octokit.rest.repos.compareCommits({
-        owner,
-        repo,
-        base,
-        head,
-      });
-      return cmp.data.behind_by || 0;
-    } catch (e) {
-      const errorMessage = getErrorMessage(e);
-      core.warning(
-        `compareCommits failed for ${base}..${head}: ${errorMessage}`
-      );
-      return null;
-    }
+    return await gh.compareCommits(owner, repo, base, head);
   }
 
   async function maybeUpdateBranch(
     prNumber: number,
-    currentSha: string
+    currentSha: string,
   ): Promise<string> {
     if (!behindMaxCommits || behindMaxCommits <= 0) return currentSha;
 
-    const pr = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: prNumber,
-    });
+    const pr = await gh.getPullRequest(owner, repo, prNumber);
 
-    const headRef = pr.data.head.ref;
-    const headRepo = pr.data.head.repo;
+    const headRef = pr.head.ref;
+    const headRepo = pr.head.repo;
     if (!headRepo) {
       core.warning(`PR #${prNumber} has no head repo, skipping update check`);
       return currentSha;
@@ -610,21 +735,14 @@ function createPROperations(
 
     if (behind > behindMaxCommits) {
       try {
-        await octokit.request(
-          "POST /repos/{owner}/{repo}/pulls/{pull_number}/update-branch",
-          { owner, repo, pull_number: prNumber }
-        );
+        await gh.updatePullRequestBranch(owner, repo, prNumber);
 
-        const pr2 = await octokit.rest.pulls.get({
-          owner,
-          repo,
-          pull_number: prNumber,
-        });
+        const pr2 = await gh.getPullRequest(owner, repo, prNumber);
 
         core.notice(
-          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.data.head.sha}`
+          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.head.sha}`,
         );
-        return pr2.data.head.sha;
+        return pr2.head.sha;
       } catch (e) {
         const errorMessage = getErrorMessage(e);
         core.warning(`Auto update failed for PR #${prNumber}: ${errorMessage}`);
@@ -637,39 +755,20 @@ function createPROperations(
   async function setStatus(
     sha: string,
     state: "pending" | "success" | "failure" | "error",
-    description: string
+    description: string,
   ): Promise<void> {
-    await octokit.rest.repos.createCommitStatus({
-      owner,
-      repo,
-      sha,
-      state,
-      context: statusContext,
-      description,
-    });
+    await gh.createCommitStatus(owner, repo, sha, state, statusContext, description);
   }
 
   async function stageOnBranch(
     trainBranch: string,
     headSha: string,
     baseSha: string,
-    branchOps: ReturnType<typeof createBranchOperations>
+    branchOps: ReturnType<typeof createBranchOperations>,
   ): Promise<StageResult> {
     await branchOps.ensureBranch(trainBranch, baseSha);
-    try {
-      const m = await octokit.rest.repos.merge({
-        owner,
-        repo,
-        base: trainBranch,
-        head: headSha,
-      });
-      return { stagedSha: m.data.sha, conflict: false };
-    } catch (e) {
-      if (isOctokitError(e) && e.status === 409) {
-        return { stagedSha: null, conflict: true };
-      }
-      throw e;
-    }
+    const result = await gh.mergeBranches(owner, repo, trainBranch, headSha);
+    return { stagedSha: result.sha, conflict: result.conflict };
   }
 
   async function fetchPrDetails(numbers: number[]): Promise<PrDetail[]> {
@@ -683,20 +782,16 @@ function createPROperations(
 
   async function fetchSinglePrDetail(num: number): Promise<PrDetail> {
     try {
-      const pr = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: num,
-      });
+      const pr = await gh.getPullRequest(owner, repo, num);
       return {
         num,
-        title: pr.data.title || "-",
-        user: pr.data.user ? pr.data.user.login : "-",
-        created: pr.data.created_at ? pr.data.created_at.substring(0, 10) : "-",
-        head: pr.data.head ? pr.data.head.ref : "-",
-        state: pr.data.draft
+        title: pr.title || "-",
+        user: pr.user ? pr.user.login : "-",
+        created: pr.created_at ? pr.created_at.substring(0, 10) : "-",
+        head: pr.head ? pr.head.ref : "-",
+        state: pr.draft
           ? "DRAFT"
-          : (pr.data.mergeable_state || "-").toUpperCase(),
+          : (pr.mergeable_state || "-").toUpperCase(),
       };
     } catch {
       return {
@@ -723,57 +818,27 @@ function createPROperations(
  * Create dashboard operations
  */
 function createDashboardOperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   dashboardTitle: string,
   dashboardLabel: string,
   dashboardPin: boolean,
-  dashboardScanOpenIssues: number
+  dashboardScanOpenIssues: number,
 ) {
   async function getLabelsToUse(): Promise<string[]> {
     const labelsToUse: string[] = [];
     if (dashboardLabel) {
-      try {
-        const { data: existingLabels } =
-          await octokit.rest.issues.listLabelsForRepo({
-            owner,
-            repo,
-            per_page: 100,
-          });
-
-        const hasLabel = existingLabels.some(
-          (l: GithubLabel) =>
-            l.name.toLowerCase() === dashboardLabel.toLowerCase()
-        );
-
-        if (hasLabel) {
-          labelsToUse.push(dashboardLabel);
-        } else {
-          core.info(
-            `Dashboard label "${dashboardLabel}" not found; issue will be unlabeled.`
-          );
-        }
-      } catch (e) {
-        const errorMessage = getErrorMessage(e);
-        core.warning(`Failed to list labels: ${errorMessage}`);
-      }
+      // Label should already be created by initializeLabels()
+      // Just add it to the list for the dashboard issue
+      labelsToUse.push(dashboardLabel);
     }
     return labelsToUse;
   }
 
   async function findExistingIssue(): Promise<GithubIssue | null> {
     try {
-      const { data: openIssues } = await octokit.rest.issues.listForRepo({
-        owner,
-        repo,
-        state: "open",
-        per_page: dashboardScanOpenIssues,
-      });
-
-      const found = openIssues.find(
-        (i: GithubIssue) => i.title === dashboardTitle
-      );
+      const openIssues = await gh.listIssues(owner, repo, "open", dashboardScanOpenIssues);
+      const found = openIssues.find((i) => i.title === dashboardTitle);
       return found || null;
     } catch (e) {
       const errorMessage = getErrorMessage(e);
@@ -782,53 +847,46 @@ function createDashboardOperations(
     }
   }
 
-  async function pinIssue(_issueNumber: number): Promise<void> {
-    // Note: GitHub's pinIssue API may not be available in all Octokit versions
-    // Skipping pin functionality for now to avoid TypeScript errors
+  async function pinIssue(issueNumber: number): Promise<void> {
     if (!dashboardPin) return;
-    // try {
-    //   await octokit.rest.issues.pinIssue({
-    //     owner,
-    //     repo,
-    //     issue_number: issueNumber,
-    //   });
-    // } catch {
-    //   // Ignore pin errors
-    // }
+    try {
+      await gh.pinIssue(owner, repo, issueNumber);
+      core.info(`Pinned dashboard issue #${issueNumber}`);
+    } catch (e) {
+      const errorMessage = getErrorMessage(e);
+      core.warning(`Failed to pin issue #${issueNumber}: ${errorMessage}`);
+    }
+  }
+
+  async function lockIssue(issueNumber: number): Promise<void> {
+    try {
+      await gh.lockIssue(owner, repo, issueNumber, "resolved");
+      core.info(`Locked dashboard issue #${issueNumber}`);
+    } catch (e) {
+      const errorMessage = getErrorMessage(e);
+      core.warning(`Failed to lock issue #${issueNumber}: ${errorMessage}`);
+    }
   }
 
   async function updateExistingIssue(
     issueNumber: number,
-    body: string
+    body: string,
   ): Promise<void> {
-    await octokit.rest.issues.update({
-      owner,
-      repo,
-      issue_number: issueNumber,
-      body,
-    });
+    await gh.updateIssue(owner, repo, issueNumber, body);
     await pinIssue(issueNumber);
+    await lockIssue(issueNumber);
   }
 
   async function createNewIssue(body: string, labels: string[]): Promise<void> {
     try {
-      const created = await octokit.rest.issues.create({
-        owner,
-        repo,
-        title: dashboardTitle,
-        body,
-        labels,
-      });
-      await pinIssue(created.data.number);
+      const issueNumber = await gh.createIssue(owner, repo, dashboardTitle, body, labels);
+      await pinIssue(issueNumber);
+      await lockIssue(issueNumber);
     } catch {
       try {
-        const created = await octokit.rest.issues.create({
-          owner,
-          repo,
-          title: dashboardTitle,
-          body,
-        });
-        await pinIssue(created.data.number);
+        const issueNumber = await gh.createIssue(owner, repo, dashboardTitle, body);
+        await pinIssue(issueNumber);
+        await lockIssue(issueNumber);
       } catch (e2) {
         const errorMessage = getErrorMessage(e2);
         core.warning(`Failed to create dashboard issue: ${errorMessage}`);
@@ -852,6 +910,23 @@ function createDashboardOperations(
 
 /**
  * Execute the main queue workflow
+ *
+ * This is the core orchestration function that implements the merge queue algorithm.
+ * It performs the following steps:
+ * 1. Reads the current queue state from the state branch
+ * 2. Fetches all open PRs and filters for eligible candidates (approved, not draft, no conflicts)
+ * 3. Identifies fastlane candidates based on configured regex patterns
+ * 4. Updates the queue with eligible PRs (FIFO order)
+ * 5. Selects the next candidate (fastlane takes priority over queue head)
+ * 6. Processes the candidate through staging and testing
+ * 7. Updates the dashboard with current queue state
+ *
+ * @param config - Configuration object containing all action inputs
+ * @param fastlaneRegexes - Compiled regex patterns for identifying fastlane PRs
+ * @param branchOps - Branch operation helpers (create, update, delete branches)
+ * @param queueOps - Queue state management helpers (read/write queue)
+ * @param prOps - Pull request operation helpers (fetch, update, stage, status)
+ * @param dashboardOps - Dashboard management helpers (upsert issue)
  */
 async function executeQueueWorkflow(
   config: Config,
@@ -859,7 +934,7 @@ async function executeQueueWorkflow(
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
   prOps: ReturnType<typeof createPROperations>,
-  dashboardOps: ReturnType<typeof createDashboardOperations>
+  dashboardOps: ReturnType<typeof createDashboardOperations>,
 ) {
   const queueInfo = await queueOps.readQueue();
   let queue: number[] = queueInfo.queue.slice();
@@ -870,12 +945,12 @@ async function executeQueueWorkflow(
     (pr) =>
       !pr.isDraft &&
       pr.reviewDecision === "APPROVED" &&
-      pr.mergeable !== "CONFLICTING"
+      pr.mergeable !== "CONFLICTING",
   );
 
   const fastCandidate = eligible.find((pr) => isFastlane(pr, fastlaneRegexes));
   const normalEligible = eligible.filter(
-    (pr) => !isFastlane(pr, fastlaneRegexes)
+    (pr) => !isFastlane(pr, fastlaneRegexes),
   );
   const eligibleNums = new Set(normalEligible.map((p) => p.number));
 
@@ -888,7 +963,7 @@ async function executeQueueWorkflow(
   const currentQueueContent = JSON.stringify(
     { version: 1, queue: queueInfo.queue },
     null,
-    2
+    2,
   );
   const newQueueContent = JSON.stringify(newQueueJson, null, 2);
 
@@ -924,7 +999,7 @@ async function executeQueueWorkflow(
     branchOps,
     queueOps,
     prOps,
-    dashboardOps
+    dashboardOps,
   );
 }
 
@@ -935,7 +1010,7 @@ async function updateDashboard(
   queue: number[],
   prOps: ReturnType<typeof createPROperations>,
   dashboardOps: ReturnType<typeof createDashboardOperations>,
-  baseBranch: string
+  baseBranch: string,
 ) {
   const rows = await prOps.fetchPrDetails(queue);
   const md = renderQueueMarkdown(rows, baseBranch);
@@ -944,7 +1019,27 @@ async function updateDashboard(
 }
 
 /**
- * Process a candidate PR
+ * Process a candidate PR through the merge queue workflow
+ *
+ * This function handles the complete lifecycle of testing a PR:
+ * 1. Updates the PR branch if it's behind the base branch (optional)
+ * 2. Sets commit status to "pending" to indicate queueing
+ * 3. Stages the PR on the appropriate branch (fastlane or regular queue)
+ * 4. Handles three possible outcomes:
+ *    - Conflict: Comments on PR and sets status to "failure"
+ *    - Base moved: Defers processing to next run with "pending" status
+ *    - Success: Merges in live mode or sets "success" status in shadow mode
+ * 5. Updates the dashboard with current queue state
+ *
+ * @param candidate - The PR node to process
+ * @param isFastCandidate - Whether this PR is on the fastlane track
+ * @param queue - Current queue array of PR numbers
+ * @param queueSha - SHA of the queue file for optimistic locking
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
+ * @param dashboardOps - Dashboard management helpers
  */
 async function processCandidate(
   candidate: PullRequestNode,
@@ -955,7 +1050,7 @@ async function processCandidate(
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
   prOps: ReturnType<typeof createPROperations>,
-  dashboardOps: ReturnType<typeof createDashboardOperations>
+  dashboardOps: ReturnType<typeof createDashboardOperations>,
 ) {
   const prNumber = candidate.number;
   let prHeadSha = candidate.headRefOid;
@@ -971,7 +1066,7 @@ async function processCandidate(
     trainBranch,
     prHeadSha,
     initialBaseSha,
-    branchOps
+    branchOps,
   );
 
   if (staged.conflict) {
@@ -981,7 +1076,7 @@ async function processCandidate(
       trainBranch,
       config,
       branchOps,
-      prOps
+      prOps,
     );
     return;
   }
@@ -1002,7 +1097,7 @@ async function processCandidate(
       config,
       branchOps,
       queueOps,
-      prOps
+      prOps,
     );
   }
 
@@ -1012,7 +1107,22 @@ async function processCandidate(
 }
 
 /**
- * Handle merge conflict scenario
+ * Handle a merge conflict scenario
+ *
+ * When a PR cannot be merged cleanly with the base branch, this function:
+ * 1. Comments on the PR to notify the author
+ * 2. Sets commit status to "failure"
+ * 3. Optionally cleans up the staging branch
+ *
+ * The PR remains in the queue but will fail staging on each attempt until
+ * the author resolves conflicts by rebasing or merging the base branch.
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param trainBranch - Staging branch name
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleConflict(
   prNumber: number,
@@ -1020,43 +1130,64 @@ async function handleConflict(
   trainBranch: string,
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
-  const octokit = github.getOctokit(config.token);
 
   const comment = `Merge queue could not stage this PR due to conflicts with the latest \`${config.baseBranch}\`. Please rebase/merge and push.`;
-  await octokit.rest.issues.createComment({
-    owner,
-    repo,
-    issue_number: prNumber,
-    body: comment,
-  });
+  await gh.commentOnIssue(owner, repo, prNumber, comment);
 
   await prOps.setStatus(prHeadSha, "failure", "Conflict with base branch");
   if (config.cleanQueue) await branchOps.deleteBranch(trainBranch);
 }
 
 /**
- * Handle base moved scenario
+ * Handle scenario where base branch moved during testing
+ *
+ * If the base branch receives new commits while a PR is being staged/tested,
+ * we defer processing to the next workflow run to ensure the PR is tested
+ * against the latest base. This prevents merging stale code.
+ *
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param trainBranch - Staging branch name
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleBaseMoved(
   prHeadSha: string,
   trainBranch: string,
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   await prOps.setStatus(
     prHeadSha,
     "pending",
-    "Base moved during test; will retry"
+    "Base moved during test; will retry",
   );
   if (config.cleanQueue) await branchOps.deleteBranch(trainBranch);
 }
 
 /**
- * Handle success scenario
+ * Handle successful staging scenario
+ *
+ * When a PR successfully stages without conflicts and the base hasn't moved:
+ * - In live mode: Actually merges the PR to the base branch
+ * - In shadow mode: Sets success status without merging (for testing)
+ *
+ * Optionally cleans up the staging branch after processing.
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param isFastCandidate - Whether this is a fastlane PR
+ * @param trainBranch - Staging branch name
+ * @param queue - Current queue array
+ * @param queueSha - SHA of the queue file
+ * @param config - Configuration object
+ * @param branchOps - Branch operation helpers
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
  */
 async function handleSuccess(
   prNumber: number,
@@ -1068,7 +1199,7 @@ async function handleSuccess(
   config: Config,
   branchOps: ReturnType<typeof createBranchOperations>,
   queueOps: ReturnType<typeof createQueueOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   if (config.mode === "live") {
     await mergePR(
@@ -1079,7 +1210,7 @@ async function handleSuccess(
       queueSha,
       config,
       queueOps,
-      prOps
+      prOps,
     );
   } else {
     await prOps.setStatus(
@@ -1087,7 +1218,7 @@ async function handleSuccess(
       "success",
       isFastCandidate
         ? "Fastlane passed on staging (shadow)"
-        : "Passed on staging (shadow)"
+        : "Passed on staging (shadow)",
     );
   }
 
@@ -1097,7 +1228,20 @@ async function handleSuccess(
 }
 
 /**
- * Merge PR in live mode
+ * Merge a PR in live mode
+ *
+ * Performs the actual merge operation using the configured merge method
+ * (merge or squash). On success, sets commit status to "success" and removes
+ * the PR from the queue (unless it's a fastlane PR).
+ *
+ * @param prNumber - Pull request number
+ * @param prHeadSha - SHA of the PR's head commit
+ * @param isFastCandidate - Whether this is a fastlane PR (not removed from queue)
+ * @param queue - Current queue array
+ * @param queueSha - SHA of the queue file
+ * @param config - Configuration object
+ * @param queueOps - Queue state management helpers
+ * @param prOps - Pull request operation helpers
  */
 async function mergePR(
   prNumber: number,
@@ -1107,25 +1251,20 @@ async function mergePR(
   queueSha: string | null,
   config: Config,
   queueOps: ReturnType<typeof createQueueOperations>,
-  prOps: ReturnType<typeof createPROperations>
+  prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
-  const octokit = github.getOctokit(config.token);
 
   try {
-    await octokit.rest.pulls.merge({
-      owner,
-      repo,
-      pull_number: prNumber,
-      merge_method: config.mergeMethod === "squash" ? "squash" : "merge",
-    });
+    const mergeMethod = config.mergeMethod === "squash" ? "squash" : "merge";
+    await gh.mergePullRequest(owner, repo, prNumber, mergeMethod);
 
     await prOps.setStatus(
       prHeadSha,
       "success",
       isFastCandidate
         ? "Fastlane passed; merged to base"
-        : "Passed on staging; merged to base"
+        : "Passed on staging; merged to base",
     );
   } catch (e) {
     const errorMessage = getErrorMessage(e);

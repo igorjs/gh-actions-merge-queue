@@ -37,7 +37,7 @@
     "formatter": {
       "quoteStyle": "double",
       "semicolons": "always",
-      "trailingCommas": "es5"
+      "trailingCommas": "all"
     }
   },
   "assist": {

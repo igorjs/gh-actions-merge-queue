@@ -116,10 +116,9 @@ inputs:
   dashboard_label:
     description: >-
       Optional existing label to attach to the dashboard issue. The label
-      must exist in the repository; if it doesn’t the issue will be created
-      without labels.
+      will be created automatically if it doesn't exist.
     required: false
-    default: "merge-queue-dashboard"
+    default: "mq/dashboard"
   dashboard_pin:
     description: >-
       Whether to pin the dashboard issue when created or updated. Requires
