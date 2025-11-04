@@ -60,10 +60,10 @@ jobs:
       - name: Commit files # commit the new dist folder
         if: ${{ steps.diff.outcome == 'failure' }}
         run: |
-          git config --local user.email "igorjs@users.noreply.github.com"
+          git config --local user.email "2278164+igorjs@users.noreply.github.com
           git config --local user.name "GitHub Action CI"
           git add ./dist
-          git commit -m "chore(ci): update dist folder"
+          git commit --signoff -m "chore(ci): update dist folder"
           git push
         env:
           GITHUB_TOKEN: ${{ github.token }}
