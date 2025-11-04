@@ -20,14 +20,6 @@ interface PullRequestNode {
   mergeable: string;
 }
 
-interface GraphQLPRResponse {
-  repository: {
-    pullRequests: {
-      nodes: PullRequestNode[];
-    };
-  };
-}
-
 interface QueueData {
   version: number;
   queue: number[];
@@ -494,26 +486,7 @@ function createPROperations(
   behindMaxCommits: number,
 ) {
   async function fetchOpenPRs(): Promise<PullRequestNode[]> {
-    const query = `
-        query($owner: String!, $repo: String!, $base: String!) {
-          repository(owner: $owner, name: $repo) {
-            pullRequests(states: OPEN, baseRefName: $base, first: 100, orderBy: { field: CREATED_AT, direction: ASC }) {
-              nodes {
-                createdAt
-                title
-                number
-                isDraft
-                headRefName
-                headRefOid
-                reviewDecision
-                mergeable
-              }
-            }
-          }
-        }
-      `;
-
-    return await gh.fetchOpenPRs(owner, repo, baseBranch, query);
+    return await gh.fetchOpenPRs(owner, repo, baseBranch);
   }
 
   async function getBehindBy(

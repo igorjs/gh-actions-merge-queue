@@ -39,7 +39,7 @@ export interface PullRequest {
   mergeable_state: string;
 }
 
-export interface GraphQLPRNode {
+export interface PRNode {
   createdAt: string;
   title: string;
   number: number;
@@ -210,23 +210,6 @@ export async function listIssues(
 }
 
 /**
- * Get issue node ID (for GraphQL operations)
- */
-export async function getIssueNodeId(
-  owner: string,
-  repo: string,
-  issueNumber: number,
-): Promise<string> {
-  const output = await execGh([
-    'issue', 'view', issueNumber.toString(),
-    '--repo', `${owner}/${repo}`,
-    '--json', 'id',
-    '--jq', '.id',
-  ]);
-  return output;
-}
-
-/**
  * Create an issue
  */
 export async function createIssue(
@@ -307,22 +290,17 @@ export async function commentOnIssue(
 }
 
 /**
- * Pin an issue (GraphQL mutation)
+ * Pin an issue
  */
 export async function pinIssue(
   owner: string,
   repo: string,
   issueNumber: number,
 ): Promise<void> {
-  const issueId = await getIssueNodeId(owner, repo, issueNumber);
-
-  await execGhApi('graphql', {
-    method: 'POST',
-    fields: {
-      query: 'mutation($issueId: ID!) { pinIssue(input: { issueId: $issueId }) { issue { id } } }',
-      issueId,
-    },
-  });
+  await execGhVoid([
+    'issue', 'pin', issueNumber.toString(),
+    '--repo', `${owner}/${repo}`,
+  ]);
 }
 
 // ============================================================================
@@ -393,26 +371,23 @@ export async function mergePullRequest(
 }
 
 /**
- * Fetch open PRs using GraphQL
+ * Fetch open PRs
  */
 export async function fetchOpenPRs(
   owner: string,
   repo: string,
   baseBranch: string,
-  query: string,
-): Promise<GraphQLPRNode[]> {
-  const output = await execGhApi('graphql', {
-    method: 'POST',
-    fields: {
-      query,
-      owner,
-      repo,
-      base: baseBranch,
-    },
-  });
+): Promise<PRNode[]> {
+  const output = await execGh([
+    'pr', 'list',
+    '--repo', `${owner}/${repo}`,
+    '--base', baseBranch,
+    '--state', 'open',
+    '--limit', '100',
+    '--json', 'createdAt,title,number,isDraft,headRefName,headRefOid,reviewDecision,mergeable',
+  ]);
 
-  const result = JSON.parse(output);
-  return result.data?.repository?.pullRequests?.nodes || [];
+  return JSON.parse(output);
 }
 
 // ============================================================================
