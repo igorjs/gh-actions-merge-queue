@@ -10,6 +10,21 @@ This repository provides a GitHub composite action that implements a **merge que
 * **Shadow vs. live mode** – Shadow mode tests your configuration without merging; live mode performs actual merges.
 * **No additional services required** – Uses the built‑in `GITHUB_TOKEN` only; no enterprise features or external CI are required.
 
+## How It Works
+
+The merge queue action maintains a FIFO queue of approved pull requests and processes them sequentially:
+
+1. **Queue Discovery**: Scans all open PRs and adds approved, non-draft PRs to the queue
+2. **Candidate Selection**: Picks the next PR from the queue (or a fastlane PR if available)
+3. **Staging**: Creates a temporary branch merging the PR with the current base branch
+4. **Testing**: CI runs tests on the staged merge (via required status checks)
+5. **Merging**: If tests pass and base hasn't moved, merges the PR (in live mode)
+6. **Cleanup**: Removes PR from queue and deletes staging branch
+
+**Key Benefit**: Every PR is tested against the latest base branch before merging, preventing integration issues without requiring "update branch before merge" in GitHub settings.
+
+See [docs/ALGORITHM.md](docs/ALGORITHM.md) for detailed algorithm documentation.
+
 ## Installation
 
 Add the action to your workflow by referencing the tag in your repository. Make sure your repository's **Settings → Branch protection** requires the custom status set in `status_context` (default `merge‑queue`) and disables **"Require branches to be up to date with base"**.
@@ -99,11 +114,169 @@ This action exposes a number of inputs to customise behaviour:
 
 ## Branch Protection
 
-1. Protect your base branch (`master` or `main`).
-2. Require pull request reviews as you normally do.
-3. Add the status context specified in your workflow (default `merge‑queue`) as the only required status check.
-4. Turn **off** "Require branches to be up to date before merging."
-5. Allow **merge commits** (recommended) or configure your merge method to squash.
+Configure branch protection rules to work with the merge queue:
+
+1. **Protect your base branch** (`master` or `main`) – Standard GitHub branch protection
+2. **Require pull request reviews** – Use your normal review requirements (e.g., 1-2 approvals, CODEOWNERS)
+3. **Add the status context as the only required status check** – Set `merge‑queue` (or your custom `status_context`) as required. This ensures PRs can only merge after passing queue staging.
+4. **Turn OFF "Require branches to be up to date before merging"** – The queue handles this automatically by testing PRs against the latest base during staging. Enabling this setting would force unnecessary branch updates.
+5. **Allow merge commits** (recommended) – Or configure your merge method to match your `merge_method` setting (squash/rebase)
+
+**Why this configuration?** The merge queue replaces GitHub's "require branches to be up to date" feature with a more efficient approach. Instead of forcing every PR to update its branch before merge (which can cause a cascade of updates), the queue tests each PR's merge result on a staging branch. This provides the same safety guarantee (no untested code reaches main) with fewer branch updates and faster throughput.
+
+## Common Use Cases
+
+### 1. Hotfix Fast Lane
+Use the fastlane to bypass the queue for urgent fixes:
+
+```yaml
+fastlane_matchers: "^hotfix/,^security/,\\bURGENT\\b"
+```
+
+PRs with branches like `hotfix/critical-bug` or titles containing "URGENT" will be processed immediately, jumping ahead of the regular queue.
+
+### 2. Auto-Update Stale Branches
+Automatically update PR branches that have fallen behind:
+
+```yaml
+behind_max_commits: "50"
+```
+
+When a PR is more than 50 commits behind the base branch, the action will trigger GitHub's "update branch" operation before staging. Set to `0` to disable.
+
+### 3. Squash Merge Strategy
+Use squash commits for a linear history:
+
+```yaml
+merge_method: squash
+mode: live
+```
+
+All commits in the PR will be squashed into a single commit when merged. Note that squash changes the commit SHA, but the queue has already tested the merge result.
+
+### 4. Multiple Base Branches
+Run separate queues for different branches (e.g., `main` and `develop`):
+
+```yaml
+# .github/workflows/merge-queue-main.yml
+- uses: igorjs/gh-actions-merge-queue@v1
+  with:
+    base_branch: main
+    queue_branch: merge-queue/main-staging
+    state_branch: merge-queue/main-state
+
+# .github/workflows/merge-queue-develop.yml
+- uses: igorjs/gh-actions-merge-queue@v1
+  with:
+    base_branch: develop
+    queue_branch: merge-queue/develop-staging
+    state_branch: merge-queue/develop-state
+```
+
+Each workflow manages its own queue independently with separate concurrency groups.
+
+### 5. Shadow Mode Testing
+Test your merge queue configuration without actually merging PRs:
+
+```yaml
+mode: shadow
+```
+
+The action will stage PRs and set commit statuses, but won't perform actual merges. Use this to validate your setup before going live.
+
+### 6. High-Frequency Queue Processing
+Process the queue more frequently for faster turnaround:
+
+```yaml
+on:
+  schedule:
+    - cron: "*/3 * * * *"  # Every 3 minutes
+```
+
+More frequent runs mean shorter wait times, but higher CI resource usage. Balance based on your team's needs.
+
+### 7. Monorepo with Path Filters
+Only trigger the queue for changes to specific paths:
+
+```yaml
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+    paths:
+      - 'services/api/**'
+      - 'shared/**'
+```
+
+Combine with GitHub's path filtering to run separate queues for different parts of a monorepo.
+
+## Troubleshooting
+
+### Queue Not Processing PRs
+
+**Symptom**: Approved PRs remain in "pending" status
+
+**Common causes**:
+- Workflow not triggering frequently enough (check `schedule` cron)
+- Concurrency group blocking new runs (check Actions tab)
+- PR doesn't meet eligibility criteria (not approved, is draft, or has conflicts)
+- Branch protection not configured correctly (missing required status check)
+
+**Solution**: Check workflow runs in the Actions tab for errors, verify the PR is approved and not a draft, and ensure branch protection requires the `merge-queue` status check.
+
+### Merge Conflicts
+
+**Symptom**: PR shows "merge-queue: failure" with conflict comment
+
+**Cause**: PR branch conflicts with current base branch
+
+**Solution**: Rebase or merge the base branch into your PR branch:
+```bash
+git fetch origin
+git rebase origin/main  # or: git merge origin/main
+git push --force-with-lease
+```
+
+### Base Moved During Test
+
+**Symptom**: PR status shows "pending" with "Base moved during test; will retry"
+
+**Cause**: Another PR merged while this PR was being staged/tested
+
+**Solution**: Wait for the next workflow run (usually 3-5 minutes). The PR will be automatically re-tested against the new base. This ensures all PRs are tested against the very latest code.
+
+### Stale Branches Not Auto-Updating
+
+**Symptom**: PRs far behind base aren't being updated automatically
+
+**Common causes**:
+- `behind_max_commits` is set to `0` (disabled)
+- PR is from a fork (requires maintainer to update)
+- Insufficient permissions
+
+**Solution**: Set `behind_max_commits: "100"` (or desired threshold) in your workflow. For fork PRs, maintainers must update manually or ask contributors to rebase.
+
+### Dashboard Issue Not Created
+
+**Symptom**: No dashboard issue appears
+
+**Common causes**:
+- Missing `issues: write` permission in workflow
+- `enable_queue_tracking` is `false`
+
+**Solution**: Add `issues: write` to workflow permissions and ensure `enable_queue_tracking: true` (default).
+
+### Queue Stuck on Failing PR
+
+**Symptom**: Queue won't progress because the first PR keeps failing CI
+
+**Cause**: The action doesn't automatically skip failing PRs
+
+**Solution**:
+1. PR author should fix the failing tests and push updates
+2. Or close/un-approve the PR to remove it from the queue
+3. Or manually edit the queue file on the state branch to remove the PR number
+
+For more detailed troubleshooting, see [docs/FAQ.md](docs/FAQ.md).
 
 ## License
 
