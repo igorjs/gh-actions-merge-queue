@@ -52,11 +52,6 @@ interface StageResult {
   conflict: boolean;
 }
 
-interface OctokitError {
-  status?: number;
-  message?: string;
-}
-
 interface GithubLabel {
   name: string;
 }
@@ -93,24 +88,10 @@ interface Config {
 }
 
 /**
- * Helper function to check if an error is an Octokit error with a status
- */
-function isOctokitError(error: unknown): error is OctokitError {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    ("status" in error || "message" in error)
-  );
-}
-
-/**
  * Helper function to get error message from unknown error
  */
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    return error.message;
-  }
-  if (isOctokitError(error) && error.message) {
     return error.message;
   }
   return String(error);
@@ -334,7 +315,6 @@ async function run() {
   try {
     const { owner, repo } = github.context.repo;
     const config = readConfig();
-    const octokit = github.getOctokit(config.token);
     const fastlaneRegexes = createFastlaneMatchers(
       config.fastlaneMatchersInput,
     );
@@ -353,7 +333,6 @@ async function run() {
       branchOps,
     );
     const prOps = createPROperations(
-      octokit,
       owner,
       repo,
       config.baseBranch,
@@ -508,7 +487,6 @@ function createQueueOperations(
  * Create PR operations
  */
 function createPROperations(
-  octokit: ReturnType<typeof github.getOctokit>,
   owner: string,
   repo: string,
   baseBranch: string,
@@ -535,34 +513,14 @@ function createPROperations(
         }
       `;
 
-    const result = (await octokit.graphql(query, {
-      owner,
-      repo,
-      base: baseBranch,
-    })) as GraphQLPRResponse;
-
-    return result.repository.pullRequests.nodes || [];
+    return await gh.fetchOpenPRs(owner, repo, baseBranch, query);
   }
 
   async function getBehindBy(
     base: string,
     head: string,
   ): Promise<number | null> {
-    try {
-      const cmp = await octokit.rest.repos.compareCommits({
-        owner,
-        repo,
-        base,
-        head,
-      });
-      return cmp.data.behind_by || 0;
-    } catch (e) {
-      const errorMessage = getErrorMessage(e);
-      core.warning(
-        `compareCommits failed for ${base}..${head}: ${errorMessage}`,
-      );
-      return null;
-    }
+    return await gh.compareCommits(owner, repo, base, head);
   }
 
   async function maybeUpdateBranch(
@@ -571,14 +529,10 @@ function createPROperations(
   ): Promise<string> {
     if (!behindMaxCommits || behindMaxCommits <= 0) return currentSha;
 
-    const pr = await octokit.rest.pulls.get({
-      owner,
-      repo,
-      pull_number: prNumber,
-    });
+    const pr = await gh.getPullRequest(owner, repo, prNumber);
 
-    const headRef = pr.data.head.ref;
-    const headRepo = pr.data.head.repo;
+    const headRef = pr.head.ref;
+    const headRepo = pr.head.repo;
     if (!headRepo) {
       core.warning(`PR #${prNumber} has no head repo, skipping update check`);
       return currentSha;
@@ -592,21 +546,14 @@ function createPROperations(
 
     if (behind > behindMaxCommits) {
       try {
-        await octokit.request(
-          "POST /repos/{owner}/{repo}/pulls/{pull_number}/update-branch",
-          { owner, repo, pull_number: prNumber },
-        );
+        await gh.updatePullRequestBranch(owner, repo, prNumber);
 
-        const pr2 = await octokit.rest.pulls.get({
-          owner,
-          repo,
-          pull_number: prNumber,
-        });
+        const pr2 = await gh.getPullRequest(owner, repo, prNumber);
 
         core.notice(
-          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.data.head.sha}`,
+          `PR #${prNumber} was behind by ${behind} commits; auto updated to ${pr2.head.sha}`,
         );
-        return pr2.data.head.sha;
+        return pr2.head.sha;
       } catch (e) {
         const errorMessage = getErrorMessage(e);
         core.warning(`Auto update failed for PR #${prNumber}: ${errorMessage}`);
@@ -621,14 +568,7 @@ function createPROperations(
     state: "pending" | "success" | "failure" | "error",
     description: string,
   ): Promise<void> {
-    await octokit.rest.repos.createCommitStatus({
-      owner,
-      repo,
-      sha,
-      state,
-      context: statusContext,
-      description,
-    });
+    await gh.createCommitStatus(owner, repo, sha, state, statusContext, description);
   }
 
   async function stageOnBranch(
@@ -638,20 +578,8 @@ function createPROperations(
     branchOps: ReturnType<typeof createBranchOperations>,
   ): Promise<StageResult> {
     await branchOps.ensureBranch(trainBranch, baseSha);
-    try {
-      const m = await octokit.rest.repos.merge({
-        owner,
-        repo,
-        base: trainBranch,
-        head: headSha,
-      });
-      return { stagedSha: m.data.sha, conflict: false };
-    } catch (e) {
-      if (isOctokitError(e) && e.status === 409) {
-        return { stagedSha: null, conflict: true };
-      }
-      throw e;
-    }
+    const result = await gh.mergeBranches(owner, repo, trainBranch, headSha);
+    return { stagedSha: result.sha, conflict: result.conflict };
   }
 
   async function fetchPrDetails(numbers: number[]): Promise<PrDetail[]> {
@@ -665,20 +593,16 @@ function createPROperations(
 
   async function fetchSinglePrDetail(num: number): Promise<PrDetail> {
     try {
-      const pr = await octokit.rest.pulls.get({
-        owner,
-        repo,
-        pull_number: num,
-      });
+      const pr = await gh.getPullRequest(owner, repo, num);
       return {
         num,
-        title: pr.data.title || "-",
-        user: pr.data.user ? pr.data.user.login : "-",
-        created: pr.data.created_at ? pr.data.created_at.substring(0, 10) : "-",
-        head: pr.data.head ? pr.data.head.ref : "-",
-        state: pr.data.draft
+        title: pr.title || "-",
+        user: pr.user ? pr.user.login : "-",
+        created: pr.created_at ? pr.created_at.substring(0, 10) : "-",
+        head: pr.head ? pr.head.ref : "-",
+        state: pr.draft
           ? "DRAFT"
-          : (pr.data.mergeable_state || "-").toUpperCase(),
+          : (pr.mergeable_state || "-").toUpperCase(),
       };
     } catch {
       return {
@@ -968,15 +892,9 @@ async function handleConflict(
   prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
-  const octokit = github.getOctokit(config.token);
 
   const comment = `Merge queue could not stage this PR due to conflicts with the latest \`${config.baseBranch}\`. Please rebase/merge and push.`;
-  await octokit.rest.issues.createComment({
-    owner,
-    repo,
-    issue_number: prNumber,
-    body: comment,
-  });
+  await gh.commentOnIssue(owner, repo, prNumber, comment);
 
   await prOps.setStatus(prHeadSha, "failure", "Conflict with base branch");
   if (config.cleanQueue) await branchOps.deleteBranch(trainBranch);
@@ -1055,15 +973,10 @@ async function mergePR(
   prOps: ReturnType<typeof createPROperations>,
 ) {
   const { owner, repo } = github.context.repo;
-  const octokit = github.getOctokit(config.token);
 
   try {
-    await octokit.rest.pulls.merge({
-      owner,
-      repo,
-      pull_number: prNumber,
-      merge_method: config.mergeMethod === "squash" ? "squash" : "merge",
-    });
+    const mergeMethod = config.mergeMethod === "squash" ? "squash" : "merge";
+    await gh.mergePullRequest(owner, repo, prNumber, mergeMethod);
 
     await prOps.setStatus(
       prHeadSha,
