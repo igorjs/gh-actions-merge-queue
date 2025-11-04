@@ -97,24 +97,18 @@ This action exposes a number of inputs to customise behaviour:
 * **merge_method** – `merge` (preserves the tested tree) or `squash`.
 * **clean_queue** – Whether to delete the temporary queue branches (default `true`).
 
-## Branch protection
+## Branch Protection
 
 1. Protect your base branch (`master` or `main`).
 2. Require pull request reviews as you normally do.
 3. Add the status context specified in your workflow (default `merge‑queue`) as the only required status check.
-4. Turn **off** “Require branches to be up to date before merging.”
+4. Turn **off** "Require branches to be up to date before merging."
 5. Allow **merge commits** (recommended) or configure your merge method to squash.
-
-For more information on branch protection and security policies, see the GitHub documentation【162389469722289†L471-L485】.
 
 ## License
 
-This project is licensed under the MIT License. The MIT License allows free use, modification, and distribution of the software, provided that the copyright notice and license text appear in all copies and substantial portions of the software【16404071374199†L4-L16】.
-
-## Code of Conduct
-
-Participation in this project is governed by a Code of Conduct that aims to create a welcoming and inclusive environment. The code is adapted from the Contributor Covenant v2.1 and outlines behaviours that foster a positive community and those that are unacceptable【426605577719396†L4-L27】. Please review it in [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+MIT License - see [LICENSE](LICENSE) file.
 
 ## Security
 
-To report a security vulnerability, please see [`SECURITY.md`](SECURITY.md) for instructions on responsible disclosure.
+To report a security vulnerability, see [SECURITY.md](SECURITY.md).

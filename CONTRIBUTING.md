@@ -12,7 +12,7 @@ Thank you for considering contributing to this project! The merge queue action i
 
 ## Code of Conduct
 
-This project and all contributors are expected to abide by our Code of Conduct. It outlines behaviours that contribute to a positive environment and those that are unacceptable【426605577719396†L16-L39】. Instances of abusive or harassing behaviour may be reported to the maintainers.
+This project and all contributors are expected to abide by our [Code of Conduct](CODE_OF_CONDUCT.md). Instances of abusive or harassing behavior may be reported to the maintainers.
 
 ## Support
 
