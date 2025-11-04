@@ -28,13 +28,13 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: igorjs/gh-actions-merge-queue@${{ github.head_ref || github.ref_name }}
+      - uses: igorjs/gh-actions-merge-queue@main
         with:
           base_branch: main
-          mode: shadow
+          mode: live
           merge_method: merge
           status_context: merge-queue
-          behind_max_commits: "100"
+          behind_max_commits: "5"
           fastlane_matchers: "^(hotfix|critical|security)/,\\bhotfix\\b,^hotfix:"
           dashboard_label: "mq/dashboard"
         env:
